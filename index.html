@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuraVolt Finance</title>
+<style>
+:root{--bg:#0d1520;--panel:#142030;--line:#223349;--text:#e6edf5;--dim:#8a9bb0;
+--volt:#ffb020;--sale:#35d0b9;--invest:#6ea8ff;--expense:#ff6f61;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}
+main{max-width:980px;margin:0 auto;padding:16px}
+header{display:flex;align-items:baseline;justify-content:space-between;margin:8px 0 16px}
+h1{font-size:20px;margin:0;letter-spacing:.5px}
+h1 b{color:var(--volt)}
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+.hero small{color:var(--dim)}
+.balance{font-size:clamp(32px,9vw,52px);font-weight:700;line-height:1.1;margin:4px 0 16px}
+.balance.neg{color:var(--expense)}
+.flow{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--line)}
+.flow i{display:block;height:100%;transition:width .4s}
+.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+.legend div{border-left:3px solid;padding-left:10px}
+.legend span{display:block;color:var(--dim);font-size:13px}
+.legend strong{font-size:17px}
+section{margin-top:16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+h2{font-size:16px;margin:0 0 12px}
+form{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+form .wide{grid-column:1/-1}
+label{display:flex;flex-direction:column;gap:4px;color:var(--dim);font-size:13px}
+input,select,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--volt);outline-offset:1px}
+button.primary{background:var(--volt);color:#1a1200;font-weight:700;border:0;cursor:pointer}
+.tabs{display:flex;gap:6px;margin-bottom:12px;overflow-x:auto}
+.tabs button{cursor:pointer;white-space:nowrap}
+.tabs button.on{border-color:var(--volt);color:var(--volt)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:640px}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:500;font-size:13px}
+td.amt{text-align:right;font-weight:600}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;border:1px solid}
+.del{background:none;border:0;color:var(--dim);cursor:pointer;padding:4px 8px}
+.del:hover{color:var(--expense)}
+.empty{color:var(--dim);padding:16px 0}
+#err{color:var(--expense);margin:8px 0 0;min-height:1em}
+.btn{font-size:14px;color:var(--volt);border:1px solid var(--volt);border-radius:8px;padding:8px 12px;text-decoration:none;white-space:nowrap}
+.btn:hover{background:var(--volt);color:#1a1200}
+.people{list-style:none;margin:12px 0 0;padding:0}
+.people li{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.people small,td small{color:var(--dim);display:block}
+.people li>div{flex:1}
+@media(min-width:700px){form{grid-template-columns:repeat(4,1fr)}form .wide{grid-column:span 2}}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Aura<b>Volt</b> Finance</h1><a class="btn" href="/api/report.pdf" download>Download PDF report</a></header>
+
+  <div class="hero">
+    <small>Current balance</small>
+    <div class="balance" id="balance">0.00</div>
+    <div class="flow" id="flow" aria-hidden="true"></div>
+    <div class="legend">
+      <div style="border-color:var(--invest)"><span>Invested</span><strong id="tInvest">0</strong></div>
+      <div style="border-color:var(--sale)"><span>Sales</span><strong id="tSale">0</strong></div>
+      <div style="border-color:var(--expense)"><span>Expenses</span><strong id="tExpense">0</strong></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Employees</h2>
+    <form id="pform">
+      <label>Name<input name="name" maxlength="80" required></label>
+      <label>Designation<input name="designation" maxlength="80" placeholder="e.g. Lead technician" required></label>
+      <button class="primary wide" type="submit">Add employee</button>
+    </form>
+    <ul class="people" id="people"></ul>
+    <div class="empty" id="noPeople">No employees yet. Add one to start logging entries.</div>
+  </section>
+
+  <section>
+    <h2>Add entry</h2>
+    <form id="form">
+      <label>Type
+        <select name="type" required>
+          <option value="expense">Expense</option>
+          <option value="investment">Investment</option>
+          <option value="sale">Sale</option>
+        </select>
+      </label>
+      <label>Amount
+        <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required>
+      </label>
+      <label>Employee
+        <select name="employee" required></select>
+      </label>
+      <label>Date
+        <input name="date" type="date" required>
+      </label>
+      <label class="wide">Description
+        <input name="title" maxlength="120" placeholder="e.g. 18650 cells, 40 pcs" required>
+      </label>
+      <label class="wide">Category
+        <input name="category" maxlength="60" placeholder="Components, Rent, Unit sale">
+      </label>
+      <button class="primary wide" type="submit">Save entry</button>
+    </form>
+    <p id="err" role="alert"></p>
+  </section>
+
+  <section>
+    <h2>Transactions</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Date</th><th>Employee</th><th>Description</th><th>Type</th><th style="text-align:right">Amount</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>No entries yet. Add your first one above.</div>
+  </section>
+</main>
+
+<script>
+const CUR = '$'; // change to your currency symbol
+const COLORS = {expense:'var(--expense)', investment:'var(--invest)', sale:'var(--sale)'};
+const $ = id => document.getElementById(id);
+const money = n => CUR + n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+let entries = [], employees = [], filter = 'all';
+
+$('form').date.value = new Date().toISOString().slice(0,10);
+
+async function load(){
+  const [a, b] = await Promise.all([fetch('/api/entries'), fetch('/api/employees')]);
+  entries = await a.json(); employees = await b.json();
+  render();
+}
+
+function render(){
+  renderPeople();
+  const sum = t => entries.filter(e=>e.type===t).reduce((a,e)=>a+e.amount,0);
+  const inv = sum('investment'), sale = sum('sale'), exp = sum('expense');
+  const bal = inv + sale - exp;
+  $('balance').textContent = (bal<0?'-':'') + money(Math.abs(bal));
+  $('balance').classList.toggle('neg', bal<0);
+  $('tInvest').textContent = money(inv);
+  $('tSale').textContent = money(sale);
+  $('tExpense').textContent = money(exp);
+    const total = inv + sale + exp || 1;
+  $('flow').innerHTML = [[inv,'invest'],[sale,'sale'],[exp,'expense']]
+    .map(([v,c])=>`<i style="width:${v/total*100}%;background:var(--${c})"></i>`).join('');
+
+  $('tabs').innerHTML = '';
+  [['all','All'],['expense','Expenses'],['investment','Investments'],['sale','Sales']].forEach(([k,l])=>{
+    const b = document.createElement('button');
+    b.textContent = l; b.className = filter===k?'on':'';
+    b.onclick = ()=>{filter=k;render()};
+    $('tabs').appendChild(b);
+  });
+
+  const list = entries.filter(e=>filter==='all'||e.type===filter);
+  $('empty').hidden = list.length>0;
+  const tbody = $('rows'); tbody.innerHTML = '';
+  list.forEach(e=>{
+    const tr = document.createElement('tr');
+    const cell = (txt, cls) => { const td = document.createElement('td'); td.textContent = txt; if(cls) td.className = cls; tr.appendChild(td); return td; };
+    cell(new Date(e.date).toLocaleDateString());
+    const who = cell(e.employeeName); const role = document.createElement('small');
+    role.textContent = e.employeeDesignation; who.appendChild(role);
+    cell(e.title + (e.category ? '  ·  ' + e.category : ''));
+    const t = cell(''); const tag = document.createElement('span');
+    tag.className = 'tag'; tag.textContent = e.type; tag.style.color = tag.style.borderColor = COLORS[e.type]; t.appendChild(tag);
+    cell((e.type==='expense'?'-':'+') + money(e.amount), 'amt').style.color = COLORS[e.type];
+    const d = document.createElement('td'); const x = document.createElement('button');
+    x.className = 'del'; x.textContent = '✕'; x.setAttribute('aria-label','Delete entry');
+    x.onclick = async ()=>{ if(confirm('Delete this entry?')){ await fetch('/api/entries/'+e._id,{method:'DELETE'}); load(); } };
+    d.appendChild(x); tr.appendChild(d);
+    tbody.appendChild(tr);
+  });
+}
+
+function renderPeople(){
+  const sel = $('form').employee, cur = sel.value;
+  sel.innerHTML = '';
+  employees.forEach(p=>{ const o = document.createElement('option'); o.value = p._id; o.textContent = p.name + ' (' + p.designation + ')'; sel.appendChild(o); });
+  if(cur) sel.value = cur;
+  $('noPeople').hidden = employees.length > 0;
+  const ul = $('people'); ul.innerHTML = '';
+  employees.forEach(p=>{
+    const li = document.createElement('li'), box = document.createElement('div'), n = document.createElement('span'), r = document.createElement('small'), x = document.createElement('button');
+    n.textContent = p.name; r.textContent = p.designation; box.append(n, r);
+    x.className = 'del'; x.textContent = '✕'; x.setAttribute('aria-label','Remove ' + p.name);
+    x.onclick = async ()=>{ if(confirm('Remove ' + p.name + '? Their past entries keep their name.')){ await fetch('/api/employees/' + p._id, {method:'DELETE'}); load(); } };
+    li.append(box, x); ul.appendChild(li);
+  });
+}
+
+$('pform').onsubmit = async ev=>{
+  ev.preventDefault();
+  const f = ev.target;
+  const r = await fetch('/api/employees',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(f)))});
+  if(r.ok){ f.reset(); load(); }
+};
+
+$('form').onsubmit = async ev=>{
+  ev.preventDefault();
+  if(!employees.length){ $('err').textContent = 'Add an employee first.'; return; }
+  const f = ev.target;
+  const body = Object.fromEntries(new FormData(f));
+  const r = await fetch('/api/entries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){ $('err').textContent = (await r.json()).error || 'Could not save entry.'; return; }
+  $('err').textContent = '';
+  f.title.value = f.amount.value = f.category.value = '';
+  load();
+};
+
+load();
+</script>
+</body>
+</html>
