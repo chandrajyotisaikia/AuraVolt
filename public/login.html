@@ -1,0 +1,17 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#080d19"><title>Sign in · AuraVolt</title><link rel="icon" href="/logo.png"><link rel="apple-touch-icon" href="/logo.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css"><script src="/app.js"></script></head>
+<body class="auth">
+<div class="auth-art"><img class="lockup" src="/logo-full.png" alt="AuraVolt, Technology and Energy">
+<h2>Every expense, sale and investment in one place.</h2><p>Track the business and keep your own finances in order, from your phone or your desk.</p></div>
+<main class="auth-card"><h1>Welcome back</h1><p class="dim">Sign in with the ID and password from your admin.</p>
+<form id="f"><label>ID<input name="id" autocomplete="username" autocapitalize="none" required></label>
+<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+<button class="primary">Sign in</button></form><p id="err" role="alert"></p></main>
+<script>
+document.getElementById('f').onsubmit = async ev => {
+  ev.preventDefault();
+  const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(ev.target))) });
+  const j = await r.json();
+  if (!r.ok) { document.getElementById('err').textContent = j.error; return; }
+  location.href = '/app';
+};
+</script></body></html>
