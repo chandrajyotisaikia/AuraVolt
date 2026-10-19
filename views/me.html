@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#080d19"><title>My finances · AuraVolt</title><link rel="icon" href="/logo.png"><link rel="apple-touch-icon" href="/logo.png"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css"><script src="/app.js"></script></head>
+<body><main class="shell">
+<div class="topbar"><img class="tb-logo" style="display:block" src="/logo.png" alt="AuraVolt logo"><div class="brand"><div><h1 id="who">My finances</h1><small id="role"></small></div></div><a class="btn" href="/app">Back to work</a><button class="icon-btn" onclick="toggleTheme()" aria-label="Toggle light or dark theme"><span data-i="sun"></span><span data-i="moon"></span></button><button class="icon-btn" onclick="logout()" aria-label="Sign out"><span data-i="logout"></span></button></div>
+<div class="kpis">
+  <div class="kpi main"><small>Available balance</small><div class="balance" id="balance">0.00</div><small>Income - spending - savings</small></div>
+  <div class="kpi" style="--c:var(--sale)"><small>Income</small><strong id="tIn"></strong></div>
+  <div class="kpi" style="--c:var(--expense)"><small>Spent</small><strong id="tOut"></strong></div>
+  <div class="kpi" style="--c:var(--invest)"><small>Saved</small><strong id="tSave"></strong></div>
+</div>
+<div class="grid2">
+  <section><h2>New record</h2>
+    <form id="form">
+      <label>Type<select name="type"><option value="expense">Expense</option><option value="income">Income</option><option value="saving">Saving</option></select></label>
+      <label>Amount<input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required></label>
+      <label>Category<input name="category" maxlength="60" placeholder="Food, Rent, Salary"></label>
+      <label>Date<input name="date" type="date" required></label>
+      <label class="wide">Description<input name="title" maxlength="120" required></label>
+      <button class="primary wide">Save record</button></form><p id="err" role="alert"></p></section>
+  <section><h2>Where your money goes</h2><div id="cats"></div><div class="empty" id="noCat" hidden>Add an expense to see a breakdown.</div></section>
+</div>
+<section><h2>History</h2><div class="scroll"><table><thead><tr><th>Date</th><th>Description</th><th>Type</th><th class="amt">Amount</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="empty" id="empty" hidden>No records yet. Add your first one above.</div></section>
+</main>
+<script>
+let D;
+$('form').date.value = new Date().toISOString().slice(0, 10);
+async function load() { D = await api('/api/me'); render(); }
+function render() {
+  const t = D.txns, inc = sum(t, 'income'), out = sum(t, 'expense'), sav = sum(t, 'saving'), bal = inc - out - sav;
+  $('who').textContent = D.profile.name; $('role').textContent = D.profile.designation;
+  $('balance').textContent = (bal < 0 ? '-' : '') + money(Math.abs(bal)); $('balance').classList.toggle('neg', bal < 0);
+  $('tIn').textContent = money(inc); $('tOut').textContent = money(out); $('tSave').textContent = money(sav);
+  const cats = {}; t.filter(x => x.type === 'expense').forEach(x => { const k = x.category || 'Other'; cats[k] = (cats[k] || 0) + x.amount; });
+  const top = Object.entries(cats).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  $('noCat').hidden = top.length > 0;
+  $('cats').replaceChildren(...top.map(([k, v]) => h('div', { class: 'cat' }, k, h('span', { style: `width:${v / top[0][1] * 100}%` }), money(v))));
+  $('empty').hidden = t.length > 0;
+  $('rows').replaceChildren(...t.map(x => h('tr', {}, h('td', {}, fdate(x.date)), h('td', {}, x.title + (x.category ? '  ·  ' + x.category : '')), h('td', {}, tag(x.type)),
+    h('td', { class: 'amt', style: 'color:' + COL[x.type] }, (x.type === 'income' ? '+' : '-') + money(x.amount)),
+    h('td', {}, h('button', { class: 'del', 'aria-label': 'Delete record', onclick: async () => { if (confirm('Delete this record?')) { await api('/api/me/txns/' + x._id, 'DELETE'); load(); } } }, '✕')))));
+}
+$('form').onsubmit = async ev => {
+  ev.preventDefault();
+  try { await api('/api/me/txns', 'POST', Object.fromEntries(new FormData(ev.target))); $('err').textContent = ''; const f = ev.target; f.title.value = f.amount.value = f.category.value = ''; load(); }
+  catch (e) { $('err').textContent = e.message; }
+};
+load();
+</script></body></html>
