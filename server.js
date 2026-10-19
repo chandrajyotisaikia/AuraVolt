@@ -8,7 +8,7 @@ if (!MONGODB_URI || !APP_PASSWORD) { console.error('Set MONGODB_URI and APP_PASS
 const SECRET = process.env.SESSION_SECRET || crypto.createHash('sha256').update(APP_PASSWORD + MONGODB_URI).digest('hex');
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 // ---------- helpers
 const num = x => { const n = Number(x); return Number.isFinite(n) ? n : 0; };
@@ -257,7 +257,7 @@ route('post', '/api/sales', U, async req => {
   const no = `${st.prefix || 'AV'}/${String(fy).slice(2)}-${String(fy + 1).slice(2)}/${String(c.seq).padStart(4, '0')}`;
   const s = await Sale.create({ no, date, customer: cust?._id, customerName: cust?.name || b.customerName || 'Walk-in customer', customerGstin: cust?.gstin, place, inter, lines, subtotal, cgst, sgst, igst, gst, round: r2(total - exact), total, note: b.note });
   for (const l of lines) await stockOut(l.item, l.qty, 'sale', s._id, no, date);
-  const paid = Math.min(num(b.paid), total); if (paid > 0) await Pay.create({ kind: 'sale', ref: s._id, party: s.customer, amount: paid, mode: b.mode === 'bank' ? 'bank' : 'cash', date });
+  const paid = b.payStatus === 'paid' ? total : b.payStatus === 'unpaid' ? 0 : Math.min(num(b.paid), total); if (paid > 0) await Pay.create({ kind: 'sale', ref: s._id, party: s.customer, amount: paid, mode: b.mode === 'bank' ? 'bank' : 'cash', date });
   return s;
 });
 route('post', '/api/sales/:id/cancel', A, async req => {
@@ -265,6 +265,12 @@ route('post', '/api/sales/:id/cancel', A, async req => {
   for (const l of s.lines) await stockIn(l.item, l.qty, l.cost, 'sale-cancel', s._id, s.no, new Date());
   for (const p of await Pay.find({ kind: 'sale', ref: s._id, amount: { $gt: 0 } })) await Pay.create({ kind: 'sale', ref: s._id, party: p.party, amount: -p.amount, mode: p.mode, date: new Date(), note: 'Refund: invoice cancelled' });
   s.status = 'cancelled'; await s.save(); return { ok: true };
+});
+route('post', '/api/sales/:id/unpaid', A, async req => {
+  const s = await Sale.findById(req.params.id); if (!s || s.status === 'cancelled') throw new Error('Not found');
+  const by = {}; (await Pay.find({ kind: 'sale', ref: s._id })).forEach(p => { by[p.mode] = r2((by[p.mode] || 0) + p.amount); });
+  let any = false; for (const [mode, amt] of Object.entries(by)) if (amt > 0) { any = true; await Pay.create({ kind: 'sale', ref: s._id, party: s.customer, amount: -amt, mode, date: new Date(), note: 'Marked unpaid' }); }
+  if (!any) throw new Error('This invoice has no payments to reverse'); return { ok: true };
 });
 route('post', '/api/pay', U, async req => {
   const b = req.body, kind = b.kind === 'purchase' ? 'purchase' : 'sale'; if (kind === 'purchase' && req.user.role !== 'admin') throw new Error('Not allowed');
@@ -361,7 +367,7 @@ table{width:100%;border-collapse:collapse;margin:14px 0}th,td{border:1px solid #
 .tot td{border:0;padding:3px 8px}.tot{width:auto;margin-left:auto}.b{font-weight:700;font-size:16px}button{padding:8px 16px;font:inherit;cursor:pointer;margin-bottom:12px}@media print{button{display:none}}</style></head><body>
 <button onclick="print()">Print / Save as PDF</button>
 <div class=head><div><h1>${esc(st.name || 'AuraVolt')}</h1><div>${esc(st.address)}</div><div>${st.phone ? 'Phone: ' + esc(st.phone) : ''} ${st.gstin ? ' GSTIN: <b>' + esc(st.gstin) + '</b>' : ''}</div></div>
-<div class=r><h1>TAX INVOICE</h1><div>No: <b>${esc(s.no)}</b></div><div>Date: ${fd(s.date)}</div>${s.status === 'cancelled' ? '<b style="color:#c00">CANCELLED</b>' : ''}</div></div>
+<div class=r><h1>TAX INVOICE</h1><div>No: <b>${esc(s.no)}</b></div><div>Date: ${fd(s.date)}</div><b style="color:${s.status === 'cancelled' ? '#c00' : paid >= s.total - 0.5 ? '#0a7' : '#c60'}">${s.status === 'cancelled' ? 'CANCELLED' : paid >= s.total - 0.5 ? 'PAID' : paid > 0.5 ? 'PART PAID' : 'UNPAID'}</b></div></div>
 <p><b>Bill to:</b> ${esc(s.customerName)}${s.customerGstin ? '<br>GSTIN: ' + esc(s.customerGstin) : ''}<br>Place of supply: ${esc(s.place)}</p>
 <table><thead><tr><th>#</th><th>Item</th><th class=r>Qty</th><th class=r>Rate</th><th class=r>Taxable</th><th class=r>GST</th><th class=r>Amount</th></tr></thead><tbody>${rows}</tbody></table>
 <table class=tot><tr><td>Taxable value</td><td class=r>${inr(s.subtotal)}</td></tr>${s.inter ? `<tr><td>IGST</td><td class=r>${inr(s.igst)}</td></tr>` : `<tr><td>CGST</td><td class=r>${inr(s.cgst)}</td></tr><tr><td>SGST</td><td class=r>${inr(s.sgst)}</td></tr>`}
@@ -378,6 +384,57 @@ const E = [need('employee'), async (req, res, next) => {
 route('get', '/api/me', E, async req => ({ profile: req.emp, txns: await PTxn.find({ employee: req.emp._id }).sort({ date: -1, createdAt: -1 }).limit(2000) }));
 route('post', '/api/me/txns', E, req => { const { type, title, amount, category, date } = req.body; return PTxn.create({ employee: req.emp._id, type, title, amount: num(amount), category, date }); });
 route('delete', '/api/me/txns/:id', E, async req => { await PTxn.deleteOne({ _id: req.params.id, employee: req.emp._id }); return { ok: true }; });
+
+// ---------- bulk import (JSON from Gemini or any source)
+const STATES_IN = ['Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka', 'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal', 'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu', 'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry'];
+const CATS_IN = ['Rent', 'Electricity', 'Transport', 'Packaging', 'Tools and repairs', 'Marketing', 'Professional fees', 'Other'];
+route('post', '/api/import', A, async req => {
+  const { data, dryRun } = req.body; if (!data || typeof data !== 'object') throw new Error('Paste the JSON first');
+  const errs = [], skipped = { items: 0, parties: 0 }, plan = { items: [], parties: [], expenses: [], fund: [] };
+  const list = k => Array.isArray(data[k]) ? data[k] : [], bad = (k, i, m) => errs.push(`${k} #${i + 1}: ${m}`);
+  const tx = v => String(v ?? '').trim(), mn = v => { const n = Number(String(v ?? '').replace(/[,\u20B9\s]/g, '')); return Number.isFinite(n) ? n : NaN; };
+  const stateOf = s => STATES_IN.find(x => x.toLowerCase() === tx(s).toLowerCase());
+  const modeOf = m => /bank|upi|online|card|cheque|transfer/i.test(tx(m)) ? 'bank' : 'cash';
+  const seen = new Set((await Item.find().select('name').lean()).map(i => i.name.toLowerCase()));
+  list('items').forEach((r, i) => {
+    const name = tx(r.name); if (!name) return bad('items', i, 'name is missing');
+    if (seen.has(name.toLowerCase())) { skipped.items++; return; }
+    const gst = r.gstRate === undefined || r.gstRate === '' ? 18 : mn(r.gstRate); if (!(gst >= 0 && gst <= 28)) return bad('items', i, 'gstRate must be 0 to 28');
+    const o = { name, kind: tx(r.kind).toLowerCase() === 'finished' ? 'finished' : 'raw', unit: tx(r.unit) || 'pcs', hsn: tx(r.hsn), code: tx(r.code), gstRate: gst, reorder: mn(r.reorder) || 0, salePrice: mn(r.salePrice) || 0,
+      warrantyMonths: mn(r.warrantyMonths) || 0, labour: mn(r.labour) || 0, openingQty: mn(r.openingQty) || 0, openingCost: mn(r.openingCost) || 0, bom: Array.isArray(r.bom) ? r.bom : [] };
+    if (o.openingQty < 0 || o.openingCost < 0 || o.salePrice < 0) return bad('items', i, 'quantities and prices cannot be negative');
+    seen.add(name.toLowerCase()); plan.items.push(o);
+  });
+  plan.items.forEach((o, i) => o.bom.forEach(b => { if (!seen.has(tx(b.item).toLowerCase())) bad('items', i, `bill of materials item "${tx(b.item)}" is not in your items`); else if (!(mn(b.qty) > 0)) bad('items', i, `bill of materials quantity for "${tx(b.item)}" must be more than 0`); }));
+  const exParty = new Set((await Party.find().select('name kind').lean()).map(p => p.kind + '|' + p.name.toLowerCase()));
+  list('parties').forEach((r, i) => {
+    const name = tx(r.name), kind = tx(r.kind).toLowerCase(); if (!name) return bad('parties', i, 'name is missing'); if (!['customer', 'supplier'].includes(kind)) return bad('parties', i, 'kind must be customer or supplier');
+    const k = kind + '|' + name.toLowerCase(); if (exParty.has(k)) { skipped.parties++; return; }
+    let state = ''; if (tx(r.state)) { state = stateOf(r.state); if (!state) return bad('parties', i, `unknown state "${tx(r.state)}"`); }
+    exParty.add(k); plan.parties.push({ kind, name, phone: tx(r.phone), gstin: tx(r.gstin).toUpperCase(), state, address: tx(r.address) });
+  });
+  const dated = (k, i, r) => { try { return dt(tx(r.date) || undefined); } catch { bad(k, i, 'date is not valid (use YYYY-MM-DD)'); } };
+  list('expenses').forEach((r, i) => {
+    const amount = mn(r.amount), date = dated('expenses', i, r); if (!(amount > 0)) return bad('expenses', i, 'amount must be more than 0'); if (!date) return;
+    plan.expenses.push({ date, category: CATS_IN.find(c => c.toLowerCase() === tx(r.category).toLowerCase()) || 'Other', amount: r2(amount), mode: modeOf(r.mode), note: tx(r.note) });
+  });
+  list('fund').forEach((r, i) => {
+    const amount = mn(r.amount), date = dated('fund', i, r), type = tx(r.type); if (!(amount > 0)) return bad('fund', i, 'amount must be more than 0'); if (!date) return;
+    if (!['capital_in', 'drawing', 'loan_in', 'loan_repay'].includes(type)) return bad('fund', i, 'type must be capital_in, drawing, loan_in or loan_repay');
+    plan.fund.push({ date, type, amount: r2(amount), mode: modeOf(r.mode), note: tx(r.note) });
+  });
+  const counts = Object.fromEntries(Object.entries(plan).map(([k, v]) => [k, v.length]));
+  if (errs.length || dryRun) return { ok: !errs.length, dryRun: !!dryRun, errors: errs.slice(0, 40), moreErrors: Math.max(0, errs.length - 40), counts, skipped };
+  const ids = new Map((await Item.find().select('name').lean()).map(i => [i.name.toLowerCase(), i._id]));
+  for (const o of plan.items) { const it = await Item.create({ name: o.name, kind: o.kind, unit: o.unit, hsn: o.hsn, code: o.code, gstRate: o.gstRate, reorder: o.reorder, salePrice: o.salePrice, warrantyMonths: o.warrantyMonths, labour: o.labour }); ids.set(o.name.toLowerCase(), it._id); }
+  for (const o of plan.items) {
+    const id = ids.get(o.name.toLowerCase());
+    if (o.bom.length) await Item.updateOne({ _id: id }, { bom: o.bom.map(b => ({ item: ids.get(tx(b.item).toLowerCase()), qty: mn(b.qty) })).filter(b => b.item && b.qty > 0) });
+    if (o.openingQty > 0) await stockIn(id, o.openingQty, o.openingCost, 'opening', id, 'Opening stock (import)', new Date());
+  }
+  if (plan.parties.length) await Party.insertMany(plan.parties); if (plan.expenses.length) await Expense.insertMany(plan.expenses); if (plan.fund.length) await Fund.insertMany(plan.fund);
+  return { ok: true, dryRun: false, errors: [], counts, skipped };
+});
 
 // ---------- pages
 const view = f => (req, res) => res.sendFile(path.join(__dirname, 'views', f));
