@@ -1,0 +1,39 @@
+You are helping me move my business data into my ERP software. Read ALL the business data you can see in this conversation and in any files I attached (stock lists, supplier and customer details, expenses, capital I invested). Convert it into ONE JSON object in exactly the format at the bottom.
+
+RULES
+1. Output ONLY the JSON. No explanation, no markdown, no code fences.
+2. Never invent data. If a value is unknown, use "" for text and 0 for numbers.
+3. Numbers must be plain numbers (no rupee sign, no commas, no text). Dates must be "YYYY-MM-DD".
+4. Use these exact words:
+   - item kind: "raw" (parts and materials I buy) or "finished" (machines I make and sell)
+   - party kind: "customer" or "supplier" (retailers are customers)
+   - mode: "cash" or "bank" (use "bank" for UPI, card, cheque or transfer)
+   - fund type: "capital_in" (money I put into the business), "drawing" (money I took out), "loan_in", "loan_repay"
+   - expense category: Rent, Electricity, Transport, Packaging, Tools and repairs, Marketing, Professional fees, or Other
+5. state must be the official Indian state or union territory name, for example "Tamil Nadu", "Delhi", "Uttar Pradesh".
+6. gstRate must be 0, 5, 12, 18 or 28. Use the rate in my data. If it is not stated, use 18 (I will check it).
+7. List every item once, with the same exact spelling everywhere.
+8. For raw items: openingQty = quantity in stock today, openingCost = cost per unit excluding GST.
+9. For finished items also give salePrice (excluding GST), labour (assembly cost per unit), warrantyMonths, and bom: the raw materials needed to build ONE machine, as {"item": exact raw item name, "qty": number}.
+10. Do NOT include past sales or purchase invoices. Only include stock that exists today, plus expenses and capital with their dates.
+11. If a section has no data, return an empty list for it.
+12. If the output would be very long, stop after about 150 records in total and wait for me to type "next". Each part must be a complete valid JSON object with the same four keys, and no record may appear in more than one part.
+
+FORMAT (replace the example records with my real data)
+{
+  "items": [
+    {"name": "PCB main board", "kind": "raw", "unit": "pcs", "hsn": "", "gstRate": 18, "reorder": 10, "openingQty": 40, "openingCost": 120},
+    {"name": "Solar Zatka Machine", "kind": "finished", "unit": "pcs", "hsn": "", "gstRate": 18, "reorder": 2, "salePrice": 6500, "labour": 150, "warrantyMonths": 12, "openingQty": 0, "openingCost": 0,
+     "bom": [{"item": "PCB main board", "qty": 1}]}
+  ],
+  "parties": [
+    {"kind": "supplier", "name": "ABC Electronics", "phone": "", "gstin": "", "state": "Delhi", "address": ""},
+    {"kind": "customer", "name": "Sharma Agro Store", "phone": "", "gstin": "", "state": "Haryana", "address": ""}
+  ],
+  "expenses": [
+    {"date": "2026-10-01", "category": "Rent", "amount": 5000, "mode": "cash", "note": "Shop rent"}
+  ],
+  "fund": [
+    {"date": "2026-04-01", "type": "capital_in", "amount": 100000, "mode": "bank", "note": "Starting capital"}
+  ]
+}

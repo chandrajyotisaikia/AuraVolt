@@ -7,7 +7,7 @@ const CATS = ['Rent', 'Electricity', 'Transport', 'Packaging', 'Tools and repair
 const FUND = [['capital_in', 'Capital introduced'], ['drawing', 'Owner drawing'], ['loan_in', 'Loan taken'], ['loan_repay', 'Loan repaid']];
 const PAGES = {};
 const NAV = {
-  admin: [['dash', 'Dashboard', 'grid'], ['sales', 'Sales', 'cart'], ['purchases', 'Purchases', 'truck'], ['production', 'Production', 'gear'], ['stock', 'Stock', 'box'], ['parties', 'Parties', 'users'], ['money', 'Money', 'rupee'], ['reports', 'Reports', 'chart'], ['team', 'Team', 'list']],
+  admin: [['dash', 'Dashboard', 'grid'], ['sales', 'Sales', 'cart'], ['purchases', 'Purchases', 'truck'], ['production', 'Production', 'gear'], ['stock', 'Stock', 'box'], ['parties', 'Parties', 'users'], ['money', 'Money', 'rupee'], ['reports', 'Reports', 'chart'], ['import', 'Import', 'download'], ['team', 'Team', 'list']],
   employee: [['sales', 'Sales', 'cart'], ['production', 'Production', 'gear'], ['stock', 'Stock', 'box'], ['deliveries', 'Deliveries', 'truck'], ['me', 'My money', 'wallet']],
 };
 const opt = (a, sel) => a.map(o => { const [v, l] = Array.isArray(o) ? o : [o, o]; return h('option', { value: v, ...(String(v) === String(sel) ? { selected: '' } : {}) }, l); });
@@ -88,15 +88,16 @@ PAGES.dash = async () => {
 };
 
 // ---------- sales
-const payAsk = (kind, r) => ask('Record payment', [{ k: 'amount', l: 'Amount', t: 'number', r: 1 }, { k: 'mode', l: 'Paid via', t: 'select', o: MODES }, { k: 'date', l: 'Date', t: 'date' }],
+const payAsk = (kind, r) => ask(kind === 'sale' ? 'Mark as paid' : 'Pay supplier', [{ k: 'amount', l: 'Amount', t: 'number', r: 1 }, { k: 'mode', l: 'Paid via', t: 'select', o: MODES }, { k: 'date', l: 'Date', t: 'date' }],
   { amount: r2(r.total - r.paid), date: today() }, d => api('/api/pay', 'POST', { ...d, kind, ref: r._id }), 'Save payment');
 PAGES.sales = async () => {
   const rows = await api('/api/sales'), q = h('input', { placeholder: 'Search invoice or customer' }), body = h('div');
-  const status = r => r.status === 'cancelled' ? tag('cancelled', 'var(--muted)') : r.total - r.paid > 0.5 ? tag('due', 'var(--expense)') : tag('paid', 'var(--sale)');
+  const status = r => r.status === 'cancelled' ? tag('cancelled', 'var(--muted)') : r.total - r.paid <= 0.5 ? tag('paid', 'var(--sale)') : r.paid > 0.5 ? tag('part paid', 'var(--invest)') : tag('unpaid', 'var(--expense)');
   const draw = () => { const s = q.value.toLowerCase(); body.replaceChildren(tbl([['Invoice', r => r.no], ['Date', r => fdate(r.date)], ['Customer', r => r.customerName], ['Total', r => money(r.total), 'amt'],
     ['Due', r => r.status === 'cancelled' ? '-' : money(Math.max(0, r.total - r.paid)), 'amt'], ['', status],
     ['', r => acts(h('a', { class: 'btn', href: '/invoice/' + r._id, target: '_blank' }, 'Print'),
-      r.status === 'active' && r.total - r.paid > 0.5 ? h('button', { class: 'btn', onclick: () => payAsk('sale', r) }, 'Receive') : '',
+      r.status === 'active' && r.total - r.paid > 0.5 ? h('button', { class: 'btn', onclick: () => payAsk('sale', r) }, 'Mark paid') : '',
+      A() && r.status === 'active' && r.paid > 0.5 ? h('button', { class: 'btn', onclick: async () => { if (confirm('Mark ' + r.no + ' as unpaid? The payments are reversed in the books.')) { try { await api('/api/sales/' + r._id + '/unpaid', 'POST'); await refresh(); } catch (e) { fail(e); } } } }, 'Mark unpaid') : '',
       A() && r.status === 'active' ? h('button', { class: 'btn danger', onclick: async () => { if (confirm('Cancel invoice ' + r.no + '? Stock returns and any payment is refunded in the books.')) { try { await api('/api/sales/' + r._id + '/cancel', 'POST'); await refresh(); } catch (e) { fail(e); } } } }, 'Cancel') : '')]],
     rows.filter(r => (r.no + ' ' + r.customerName).toLowerCase().includes(s)), 'No invoices yet.')); };
   q.oninput = draw; draw();
@@ -106,8 +107,8 @@ function newSale() {
   if (!D.set.state) return alert('First set your business details (state, GSTIN) under Team, Business settings, so GST is worked out correctly.');
   const custs = D.parties.filter(p => p.kind === 'customer'), ed = lineEd(byKind('finished'), { rate: 'sale' });
   const f = F([{ k: 'customer', l: 'Customer', t: 'select', o: [['', 'Walk-in customer'], ...custs.map(c => [c._id, c.name])] }, { k: 'customerName', l: 'Walk-in name (optional)' }, { k: 'date', l: 'Date', t: 'date', r: 1 },
-    { k: 'place', l: 'Place of supply (walk-in)', t: 'select', o: STATES }, { k: 'paid', l: 'Received now', t: 'number' }, { k: 'mode', l: 'Received via', t: 'select', o: MODES }, { k: 'note', l: 'Note', w: 1 }],
-    { date: today(), place: D.set.state }, async d => {
+    { k: 'place', l: 'Place of supply (walk-in)', t: 'select', o: STATES }, { k: 'payStatus', l: 'Payment', t: 'select', o: [['paid', 'Paid in full'], ['unpaid', 'Unpaid (credit)'], ['part', 'Part paid']] }, { k: 'mode', l: 'Received via', t: 'select', o: MODES }, { k: 'paid', l: 'Amount received (if part paid)', t: 'number' }, { k: 'note', l: 'Note', w: 1 }],
+    { date: today(), place: D.set.state, payStatus: 'paid' }, async d => {
       const s = await api('/api/sales', 'POST', { ...d, lines: ed.get() }); await refresh();
       dlg.querySelector('.mb').replaceChildren(h('div', {}, h('p', {}, 'Invoice ' + s.no + ' saved. Total ' + money(s.total) + '.'), acts(h('a', { class: 'btn', href: '/invoice/' + s._id, target: '_blank' }, 'Print invoice'), h('button', { class: 'btn', onclick: () => dlg.close() }, 'Close'))));
     }, 'Save invoice');
@@ -260,6 +261,21 @@ PAGES.team = async () => {
       h('button', { class: 'btn', onclick: run(() => api('/api/employees/' + e._id, 'PATCH', { status: e.status === 'active' ? 'inactive' : 'active' })) }, e.status === 'active' ? 'Deactivate' : 'Activate'),
       h('button', { class: 'btn danger', onclick: run(async () => { if (confirm('Delete ' + e.name + '? Their personal records are deleted too.')) await api('/api/employees/' + e._id, 'DELETE'); }) }, 'Delete'))]], D.emps, 'No staff yet.')),
     h('section', {}, h('h2', {}, 'Business details'), sf));
+};
+
+// ---------- import
+PAGES.import = async () => {
+  const ta = h('textarea', { rows: 10, placeholder: 'Paste the JSON from Gemini here', style: 'font-family:monospace;font-size:12px', spellcheck: 'false' }), out = h('div');
+  const file = h('input', { type: 'file', accept: '.json,.txt' }); file.onchange = async () => { ta.value = await file.files[0].text(); };
+  const parse = () => { try { return JSON.parse(ta.value.replace(/```json|```/g, '').trim()); } catch { throw new Error('That is not valid JSON. Ask Gemini to output only the JSON, with nothing before or after it.'); } };
+  const show = r => out.replaceChildren(h('div', { style: 'margin-top:12px' },
+    r.errors.length ? h('div', {}, h('p', { class: 'bad' }, 'Nothing was imported. Fix these problems first:'), ...r.errors.map(e => h('div', { class: 'li bad' }, e)), r.moreErrors ? h('small', {}, '...and ' + r.moreErrors + ' more') : '')
+      : h('p', { class: 'ok' }, (r.dryRun ? 'Looks good. Ready to import: ' : 'Imported: ') + `${r.counts.items} items, ${r.counts.parties} parties, ${r.counts.expenses} expenses, ${r.counts.fund} fund entries.` + (r.skipped.items || r.skipped.parties ? ` Skipped ${r.skipped.items} items and ${r.skipped.parties} parties that already exist.` : ''))));
+  const run = async dry => { try { const r = await api('/api/import', 'POST', { data: parse(), dryRun: dry }); show(r); if (!dry && r.ok) { await refs(); ta.value = ''; } } catch (e) { out.replaceChildren(h('p', { class: 'bad' }, e.message)); } };
+  const copy = h('button', { class: 'btn', onclick: async () => { try { await navigator.clipboard.writeText(await (await fetch('/gemini-prompt.txt')).text()); copy.textContent = 'Copied. Paste it into Gemini'; } catch { location.href = '/gemini-prompt.txt'; } } }, 'Copy the Gemini prompt');
+  return h('section', {}, head('Import data'),
+    h('p', { class: 'dim', style: 'margin-top:0' }, '1. Copy the prompt and paste it into Gemini, in the chat that has your data. 2. Paste Gemini\'s answer here. 3. Tap Check data, then Import. It brings in items with opening stock and bill of materials, customers and suppliers, expenses and company fund. Past invoices are not imported. Run each batch only once, because expenses and fund entries are not checked for duplicates.'),
+    h('div', { class: 'acts' }, copy, file), ta, h('div', { class: 'acts', style: 'margin-top:10px' }, h('button', { class: 'btn', onclick: () => run(true) }, 'Check data'), addBtn('Import', () => run(false))), out);
 };
 
 // ---------- router and boot
