@@ -1,148 +1,392 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const PDFDocument = require('pdfkit');
+const crypto = require('crypto');
 const path = require('path');
 
-const { MONGODB_URI, APP_PASSWORD, CURRENCY = '$', PORT = 3000 } = process.env;
+const { MONGODB_URI, APP_PASSWORD, ADMIN_USER = 'admin', PORT = 3000 } = process.env;
+if (!MONGODB_URI || !APP_PASSWORD) { console.error('Set MONGODB_URI and APP_PASSWORD'); process.exit(1); }
+const SECRET = process.env.SESSION_SECRET || crypto.createHash('sha256').update(APP_PASSWORD + MONGODB_URI).digest('hex');
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json());
 
-// Password gate (any username, password = APP_PASSWORD). Skipped if unset.
-app.use((req, res, next) => {
-  if (!APP_PASSWORD) return next();
-  const [, b64 = ''] = (req.headers.authorization || '').split(' ');
-  const pass = Buffer.from(b64, 'base64').toString().split(':').slice(1).join(':');
-  if (pass === APP_PASSWORD) return next();
-  res.set('WWW-Authenticate', 'Basic realm="AuraVolt"').status(401).send('Password required');
-});
-
-const Employee = mongoose.model('Employee', new mongoose.Schema({
-  name: { type: String, required: true, trim: true, maxlength: 80 },
-  designation: { type: String, required: true, trim: true, maxlength: 80 },
-}, { timestamps: true }));
-
-const Entry = mongoose.model('Entry', new mongoose.Schema({
-  type: { type: String, enum: ['expense', 'investment', 'sale'], required: true },
-  title: { type: String, required: true, trim: true, maxlength: 120 },
-  amount: { type: Number, required: true, min: 0.01 },
-  category: { type: String, trim: true, maxlength: 60, default: '' },
-  date: { type: Date, required: true, default: Date.now },
-  employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
-  // Snapshots, so old logs keep the name even if the employee is removed later
-  employeeName: { type: String, required: true },
-  employeeDesignation: { type: String, required: true },
-}, { timestamps: true }));
-
-// ---- Employees
-app.get('/api/employees', async (req, res) => res.json(await Employee.find().sort({ name: 1 })));
-
-app.post('/api/employees', async (req, res) => {
-  try {
-    const { name, designation } = req.body;
-    res.status(201).json(await Employee.create({ name, designation }));
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-app.delete('/api/employees/:id', async (req, res) => {
-  try { await Employee.findByIdAndDelete(req.params.id); res.json({ ok: true }); }
-  catch (e) { res.status(400).json({ error: 'Invalid id' }); }
-});
-
-// ---- Entries
-app.get('/api/entries', async (req, res) => {
-  res.json(await Entry.find().sort({ date: -1, createdAt: -1 }).limit(2000));
-});
-
-app.post('/api/entries', async (req, res) => {
-  try {
-    const { type, title, amount, category, date, employee } = req.body;
-    const emp = await Employee.findById(employee).catch(() => null);
-    if (!emp) return res.status(400).json({ error: 'Choose an employee.' });
-    res.status(201).json(await Entry.create({
-      type, title, amount: Number(amount), category, date,
-      employee: emp._id, employeeName: emp.name, employeeDesignation: emp.designation,
-    }));
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-app.delete('/api/entries/:id', async (req, res) => {
-  try { await Entry.findByIdAndDelete(req.params.id); res.json({ ok: true }); }
-  catch (e) { res.status(400).json({ error: 'Invalid id' }); }
-});
-
-// ---- PDF report
-const fmt = n => CURRENCY + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// ---------- helpers
+const num = x => { const n = Number(x); return Number.isFinite(n) ? n : 0; };
+const r2 = x => Math.round((x + Number.EPSILON) * 100) / 100;
+const sum = (l, k) => l.reduce((a, x) => a + (typeof k === 'function' ? k(x) : x[k] || 0), 0);
+const dt = x => { const d = x ? new Date(x) : new Date(); if (isNaN(d)) throw new Error('Invalid date'); return d; };
 const day = d => new Date(d).toISOString().slice(0, 10);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const inr = n => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const route = (m, p, g, fn) => app[m](p, g, async (req, res) => {
+  try { res.json(await fn(req)); } catch (e) { res.status(400).json({ error: e.message || 'Invalid request' }); }
+});
 
-function table(doc, widths, aligns, head, rows) {
-  let y = doc.y + 4;
-  const line = (cells, bold) => {
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor('#000');
-    let x = 40;
-    cells.forEach((t, i) => {
-      doc.text(String(t), x, y, { width: widths[i] - 6, height: 12, align: aligns[i], ellipsis: true });
-      x += widths[i];
-    });
-    y += 16;
-    if (bold) doc.moveTo(40, y - 3).lineTo(555, y - 3).strokeColor('#999').stroke();
-  };
-  line(head, true);
-  rows.forEach(r => { if (y > 780) { doc.addPage(); y = 40; line(head, true); } line(r, false); });
-  doc.x = 40; doc.y = y + 8;
+// ---------- auth (signed cookie, scrypt hashes)
+const sha = s => crypto.createHash('sha256').update(s).digest();
+const same = (a, b) => crypto.timingSafeEqual(sha(a), sha(b));
+const mac = b => crypto.createHmac('sha256', SECRET).update(b).digest('base64url');
+const sign = p => { const b = Buffer.from(JSON.stringify(p)).toString('base64url'); return b + '.' + mac(b); };
+const verify = t => { try { const [b, s] = t.split('.'); if (!same(s, mac(b))) return null; const p = JSON.parse(Buffer.from(b, 'base64url')); return p.exp > Date.now() ? p : null; } catch { return null; } };
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
+const newPw = () => crypto.randomBytes(8).toString('base64url');
+const newSalt = () => crypto.randomBytes(16).toString('hex');
+app.use((req, res, next) => {
+  const c = (req.headers.cookie || '').split('; ').find(x => x.startsWith('av='));
+  req.user = c ? verify(c.slice(3)) : null; next();
+});
+const need = roles => { roles = [].concat(roles); return (req, res, next) => req.user && roles.includes(req.user.role) ? next()
+  : req.path.startsWith('/api') ? res.status(401).json({ error: 'Sign in required' }) : res.redirect('/login.html'); };
+const A = need('admin'), U = need(['admin', 'employee']);
+
+// ---------- models
+const { Schema } = mongoose;
+const ref = n => ({ type: Schema.Types.ObjectId, ref: n });
+const M = (n, d) => mongoose.model(n, new Schema(d, { timestamps: true }));
+const T = { type: String, trim: true, maxlength: 200 };
+const Employee = M('Employee', { name: { ...T, required: true }, designation: { ...T, required: true }, email: T, phone: T, monthlySalary: { type: Number, default: 0 },
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' }, loginId: { type: String, lowercase: true, unique: true, sparse: true }, salt: String, passHash: String });
+const Party = M('Party', { kind: { type: String, enum: ['customer', 'supplier'], required: true }, name: { ...T, required: true }, phone: T, gstin: T, state: T, address: T });
+const Item = M('Item', { name: { ...T, required: true }, code: T, kind: { type: String, enum: ['raw', 'finished'], default: 'raw' }, unit: { ...T, default: 'pcs' }, hsn: T,
+  gstRate: { type: Number, default: 18 }, reorder: { type: Number, default: 0 }, salePrice: { type: Number, default: 0 }, warrantyMonths: { type: Number, default: 0 },
+  labour: { type: Number, default: 0 }, qty: { type: Number, default: 0 }, avgCost: { type: Number, default: 0 }, bom: [{ item: ref('Item'), qty: Number }], active: { type: Boolean, default: true } });
+const Move = M('Move', { item: ref('Item'), qty: Number, type: String, ref: String, refNo: String, unitCost: Number, date: Date, note: T });
+const Purchase = M('Purchase', { supplier: ref('Party'), supplierName: T, billNo: T, date: Date, expected: Date, receivedOn: Date,
+  status: { type: String, enum: ['ordered', 'in_transit', 'received', 'cancelled'], default: 'ordered' },
+  lines: [{ item: ref('Item'), name: String, qty: Number, rate: Number, gstRate: Number }], subtotal: Number, gst: Number, total: Number, note: T });
+const Sale = M('Sale', { no: String, date: Date, customer: ref('Party'), customerName: T, customerGstin: T, place: T, inter: Boolean,
+  lines: [{ item: ref('Item'), name: String, hsn: String, unit: String, qty: Number, rate: Number, gstRate: Number, taxable: Number, gst: Number, cost: Number, warranty: Number }],
+  subtotal: Number, cgst: Number, sgst: Number, igst: Number, gst: Number, round: Number, total: Number, status: { type: String, enum: ['active', 'cancelled'], default: 'active' }, note: T });
+const Pay = M('Pay', { kind: { type: String, enum: ['sale', 'purchase'] }, ref: Schema.Types.ObjectId, party: ref('Party'), amount: Number, mode: { type: String, enum: ['cash', 'bank'] }, date: Date, note: T });
+const Expense = M('Expense', { date: Date, category: T, amount: Number, mode: { type: String, enum: ['cash', 'bank'] }, note: T });
+const Fund = M('Fund', { date: Date, type: { type: String, enum: ['capital_in', 'drawing', 'loan_in', 'loan_repay'] }, amount: Number, mode: { type: String, enum: ['cash', 'bank'] }, note: T });
+const Salary = M('Salary', { employee: ref('Employee'), employeeName: T, month: T, type: { type: String, enum: ['salary', 'advance', 'bonus'], default: 'salary' }, amount: Number, mode: { type: String, enum: ['cash', 'bank'] }, date: Date, note: T });
+const Prod = M('Prod', { date: Date, product: ref('Item'), productName: T, qty: Number, lines: [{ item: ref('Item'), name: String, qty: Number, unitCost: Number }], material: Number, labour: Number, unitCost: Number, note: T });
+const Setting = M('Setting', { name: T, gstin: T, state: T, address: T, phone: T, prefix: T, cert: T });
+const Counter = mongoose.model('Counter', new Schema({ _id: String, seq: { type: Number, default: 0 } }));
+const PTxn = M('PTxn', { employee: { ...ref('Employee'), required: true, index: true }, type: { type: String, enum: ['income', 'expense', 'saving'], required: true },
+  title: { ...T, required: true }, amount: { type: Number, required: true, min: 0.01 }, category: T, date: { type: Date, default: Date.now } });
+const MONEY = { expenses: Expense, fund: Fund, salary: Salary };
+const getSet = async () => (await Setting.findOne()) || Setting.create({ name: 'AuraVolt', prefix: 'AV' });
+
+// ---------- stock
+async function stockIn(id, qty, cost, type, refId, refNo, date, note) {
+  const it = await Item.findById(id); if (!it) throw new Error('Item not found');
+  if (cost != null) { const base = Math.max(it.qty, 0); it.avgCost = r2((base * it.avgCost + qty * cost) / (base + qty || 1)); }
+  it.qty = r2(it.qty + qty); await it.save();
+  await Move.create({ item: id, qty, type, ref: String(refId || ''), refNo, unitCost: cost ?? it.avgCost, date: date || new Date(), note });
+}
+async function stockOut(id, qty, type, refId, refNo, date) {
+  const it = await Item.findById(id); const cost = it.avgCost;
+  it.qty = r2(it.qty - qty); await it.save();
+  await Move.create({ item: id, qty: -qty, type, ref: String(refId || ''), refNo, unitCost: cost, date: date || new Date() });
+  return cost;
 }
 
-app.get('/api/report.pdf', async (req, res) => {
-  const [entries, employees] = await Promise.all([
-    Entry.find().sort({ date: -1, createdAt: -1 }).lean(),
-    Employee.find().sort({ name: 1 }).lean(),
-  ]);
-  const sum = (list, t) => list.filter(e => e.type === t).reduce((a, e) => a + e.amount, 0);
-  const inv = sum(entries, 'investment'), sale = sum(entries, 'sale'), exp = sum(entries, 'expense');
+// ---------- login / session
+const tries = new Map();
+app.post('/api/login', async (req, res) => {
+  const t = tries.get(req.ip) || { n: 0, at: Date.now() };
+  if (Date.now() - t.at > 9e5) { t.n = 0; t.at = Date.now(); }
+  if (t.n >= 10) return res.status(429).json({ error: 'Too many attempts. Try again in 15 minutes.' });
+  const id = String(req.body.id || '').trim().toLowerCase(), pw = String(req.body.password || '');
+  let user = null;
+  if (id === ADMIN_USER.toLowerCase() && same(pw, APP_PASSWORD)) user = { role: 'admin', name: 'Owner' };
+  else {
+    const e = await Employee.findOne({ loginId: id });
+    if (e && e.salt && e.status === 'active' && same(hashPw(pw, e.salt), e.passHash)) user = { role: 'employee', id: String(e._id), name: e.name };
+  }
+  if (!user) { t.n++; tries.set(req.ip, t); return res.status(401).json({ error: 'Wrong ID or password.' }); }
+  res.cookie('av', sign({ ...user, exp: Date.now() + 12 * 36e5 }), { httpOnly: true, sameSite: 'strict', secure: req.secure, maxAge: 12 * 36e5 });
+  res.json({ role: user.role });
+});
+app.post('/api/logout', (req, res) => { res.clearCookie('av'); res.json({ ok: true }); });
+route('get', '/api/session', U, async req => ({ role: req.user.role, name: req.user.name }));
 
-  const doc = new PDFDocument({ margin: 40, size: 'A4' });
-  res.set({
-    'Content-Type': 'application/pdf',
-    'Content-Disposition': `attachment; filename="auravolt-report-${day(Date.now())}.pdf"`,
-  });
-  doc.pipe(res);
-
-  doc.font('Helvetica-Bold').fontSize(20).text('AuraVolt Finance Report');
-  doc.font('Helvetica').fontSize(10).fillColor('#555').text(`Generated ${day(Date.now())}`).moveDown();
-
-  doc.font('Helvetica-Bold').fontSize(12).fillColor('#000').text('Summary');
-  table(doc, [130, 130, 130, 125], ['left', 'right', 'right', 'right'],
-    ['Invested', 'Sales', 'Expenses', 'Balance'], [[fmt(inv), fmt(sale), fmt(exp), fmt(inv + sale - exp)]]);
-
-  // Group by the saved name so removed employees still appear
-  const people = new Map();
-  entries.forEach(e => {
-    const k = `${e.employeeName}|${e.employeeDesignation}`;
-    if (!people.has(k)) people.set(k, []);
-    people.get(k).push(e);
-  });
-  employees.forEach(p => { const k = `${p.name}|${p.designation}`; if (!people.has(k)) people.set(k, []); });
-
-  doc.font('Helvetica-Bold').fontSize(12).text('By employee');
-  table(doc, [115, 100, 100, 100, 100], ['left', 'left', 'right', 'right', 'right'],
-    ['Employee', 'Designation', 'Investments', 'Sales', 'Expenses'],
-    [...people].map(([k, list]) => {
-      const [n, d] = k.split('|');
-      return [n, d, fmt(sum(list, 'investment')), fmt(sum(list, 'sale')), fmt(sum(list, 'expense'))];
-    }));
-
-  doc.font('Helvetica-Bold').fontSize(12).text('All transactions');
-  table(doc, [62, 118, 150, 65, 80, 40], ['left', 'left', 'left', 'left', 'right', 'left'],
-    ['Date', 'Employee', 'Description', 'Type', 'Amount', ''],
-    entries.map(e => [day(e.date), `${e.employeeName} (${e.employeeDesignation})`,
-      e.title + (e.category ? ` / ${e.category}` : ''), e.type,
-      (e.type === 'expense' ? '-' : '+') + fmt(e.amount), '']));
-
-  doc.end();
+// ---------- settings
+route('get', '/api/settings', U, getSet);
+route('put', '/api/settings', A, async req => {
+  const u = {}; ['name', 'gstin', 'state', 'address', 'phone', 'prefix', 'cert'].forEach(k => { if (req.body[k] !== undefined) u[k] = req.body[k]; });
+  return Setting.findOneAndUpdate({}, u, { new: true, upsert: true });
 });
 
+// ---------- team
+const safe = '-salt -passHash';
+route('get', '/api/employees', A, () => Employee.find().select(safe).sort({ name: 1 }));
+async function makeLogin(name) {
+  const base = name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12) || 'user';
+  for (;;) { const id = base + crypto.randomInt(100, 1000); if (!await Employee.exists({ loginId: id })) return id; }
+}
+route('post', '/api/employees', A, async req => {
+  const { name, designation, phone, email, monthlySalary } = req.body, pw = newPw(), salt = newSalt();
+  const e = await Employee.create({ name, designation, phone, email, monthlySalary: num(monthlySalary), salt, passHash: hashPw(pw, salt), loginId: await makeLogin(String(name || '')) });
+  return { name: e.name, loginId: e.loginId, password: pw };
+});
+route('patch', '/api/employees/:id', A, async req => {
+  const u = {}; ['status', 'designation', 'email', 'phone', 'monthlySalary'].forEach(k => { if (req.body[k] !== undefined) u[k] = req.body[k]; });
+  return Employee.findByIdAndUpdate(req.params.id, u, { new: true, runValidators: true }).select(safe);
+});
+route('post', '/api/employees/:id/reset', A, async req => {
+  const e = await Employee.findById(req.params.id); if (!e) throw new Error('Not found');
+  const pw = newPw(); e.salt = newSalt(); e.passHash = hashPw(pw, e.salt); e.loginId = e.loginId || await makeLogin(e.name); await e.save();
+  return { name: e.name, loginId: e.loginId, password: pw };
+});
+route('delete', '/api/employees/:id', A, async req => { await Employee.findByIdAndDelete(req.params.id); await PTxn.deleteMany({ employee: req.params.id }); return { ok: true }; });
+
+// ---------- parties
+async function balances() {
+  const m = new Map(), add = (id, v) => m.set(String(id), (m.get(String(id)) || 0) + v);
+  (await Sale.aggregate([{ $match: { status: 'active', customer: { $ne: null } } }, { $group: { _id: '$customer', t: { $sum: '$total' } } }])).forEach(x => add(x._id, x.t));
+  (await Purchase.aggregate([{ $match: { status: { $ne: 'cancelled' }, supplier: { $ne: null } } }, { $group: { _id: '$supplier', t: { $sum: '$total' } } }])).forEach(x => add(x._id, x.t));
+  (await Pay.aggregate([{ $match: { party: { $ne: null } } }, { $group: { _id: '$party', t: { $sum: '$amount' } } }])).forEach(x => add(x._id, -x.t));
+  return m;
+}
+route('get', '/api/parties', U, async req => {
+  const ps = await Party.find().sort({ name: 1 }).lean();
+  if (req.user.role !== 'admin') return ps;
+  const bal = await balances(); return ps.map(p => ({ ...p, balance: r2(bal.get(String(p._id)) || 0) }));
+});
+route('post', '/api/parties', U, req => Party.create(pick(req.body, ['kind', 'name', 'phone', 'gstin', 'state', 'address'])));
+route('patch', '/api/parties/:id', A, req => Party.findByIdAndUpdate(req.params.id, pick(req.body, ['name', 'phone', 'gstin', 'state', 'address']), { new: true }));
+function pick(o, ks) { const r = {}; ks.forEach(k => { if (o[k] !== undefined) r[k] = typeof o[k] === 'string' ? o[k].trim() : o[k]; }); return r; }
+
+// ---------- items and stock
+route('get', '/api/items', U, async req => {
+  const it = await Item.find({ active: { $ne: false } }).sort({ name: 1 }).lean();
+  return req.user.role === 'admin' ? it : it.map(({ avgCost, labour, ...x }) => x);
+});
+const itemFields = b => ({ ...pick(b, ['name', 'code', 'kind', 'unit', 'hsn']), gstRate: num(b.gstRate), reorder: num(b.reorder), salePrice: num(b.salePrice), warrantyMonths: num(b.warrantyMonths), labour: num(b.labour),
+  bom: (b.bom || []).filter(l => l.item && num(l.qty) > 0).map(l => ({ item: l.item, qty: num(l.qty) })) });
+route('post', '/api/items', A, async req => {
+  const it = await Item.create(itemFields(req.body)), q = num(req.body.openingQty);
+  if (q > 0) await stockIn(it._id, q, num(req.body.openingCost), 'opening', it._id, 'Opening stock', new Date());
+  return it;
+});
+route('put', '/api/items/:id', A, req => Item.findByIdAndUpdate(req.params.id, itemFields(req.body), { new: true, runValidators: true }));
+route('post', '/api/items/:id/adjust', A, async req => {
+  const it = await Item.findById(req.params.id), counted = num(req.body.counted); if (!it) throw new Error('Item not found');
+  const diff = r2(counted - it.qty); if (!diff) return it;
+  it.qty = counted; await it.save();
+  await Move.create({ item: it._id, qty: diff, type: 'adjustment', refNo: 'Stock count', unitCost: it.avgCost, date: new Date(), note: String(req.body.note || '') });
+  return it;
+});
+route('post', '/api/seed', A, async () => {
+  if (await Item.countDocuments()) throw new Error('You already have items');
+  const raw = [['PCB main board', 'pcs'], ['Transformer', 'pcs'], ['HV capacitor', 'pcs'], ['MOSFET / switching device', 'pcs'], ['Enclosure box', 'pcs'], ['Solar panel 12V', 'pcs'], ['Battery 12V 7Ah', 'pcs'], ['Wires and connectors set', 'set']];
+  const made = await Item.insertMany(raw.map(([name, unit]) => ({ name, unit, kind: 'raw', gstRate: 18, reorder: 10 })));
+  await Item.create({ name: 'Solar Zatka Machine', kind: 'finished', unit: 'pcs', gstRate: 18, salePrice: 0, warrantyMonths: 12, reorder: 2, bom: made.map(i => ({ item: i._id, qty: 1 })) });
+  return { ok: true };
+});
+
+// ---------- purchases and deliveries
+async function receive(p) {
+  if (p.status === 'cancelled') throw new Error('This purchase is cancelled');
+  if (p.status === 'received') throw new Error('Already received');
+  for (const l of p.lines) await stockIn(l.item, l.qty, l.rate, 'purchase', p._id, p.billNo || 'Purchase', p.receivedOn || new Date());
+  p.status = 'received'; p.receivedOn = new Date(); await p.save();
+}
+const payMap = async kind => new Map((await Pay.aggregate([{ $match: { kind } }, { $group: { _id: '$ref', t: { $sum: '$amount' } } }])).map(x => [String(x._id), x.t]));
+route('get', '/api/purchases', A, async () => {
+  const [ps, pm] = await Promise.all([Purchase.find().sort({ date: -1, createdAt: -1 }).limit(500).lean(), payMap('purchase')]);
+  return ps.map(p => ({ ...p, paid: pm.get(String(p._id)) || 0 }));
+});
+route('get', '/api/deliveries', U, async req => {
+  const ps = await Purchase.find({ status: { $in: ['ordered', 'in_transit'] } }).sort({ expected: 1 }).lean();
+  return ps.map(p => ({ _id: p._id, supplierName: p.supplierName, billNo: p.billNo, status: p.status, expected: p.expected, date: p.date, lines: p.lines.map(l => ({ name: l.name, qty: l.qty })), ...(req.user.role === 'admin' ? { total: p.total } : {}) }));
+});
+route('post', '/api/purchases', A, async req => {
+  const b = req.body; if (!Array.isArray(b.lines) || !b.lines.length) throw new Error('Add at least one item');
+  const items = new Map((await Item.find({ _id: { $in: b.lines.map(l => l.item) } })).map(i => [String(i._id), i]));
+  const lines = b.lines.map(l => { const it = items.get(String(l.item)), qty = num(l.qty), rate = num(l.rate); if (!it) throw new Error('Item not found'); if (qty <= 0 || rate < 0) throw new Error('Check quantity and rate'); return { item: it._id, name: it.name, qty, rate, gstRate: num(l.gstRate) }; });
+  const subtotal = r2(sum(lines, l => l.qty * l.rate)), gst = r2(sum(lines, l => l.qty * l.rate * l.gstRate / 100));
+  const sup = b.supplier ? await Party.findById(b.supplier) : null;
+  const p = await Purchase.create({ supplier: sup?._id, supplierName: sup?.name || b.supplierName || '', billNo: b.billNo, date: dt(b.date), expected: b.expected ? dt(b.expected) : undefined,
+    status: ['ordered', 'in_transit', 'received'].includes(b.status) ? b.status : 'ordered', lines, subtotal, gst, total: r2(subtotal + gst), note: b.note });
+  const status = p.status; if (status === 'received') { p.status = 'ordered'; await receive(p); }
+  const paid = Math.min(num(b.paid), p.total); if (paid > 0) await Pay.create({ kind: 'purchase', ref: p._id, party: p.supplier, amount: paid, mode: b.mode === 'bank' ? 'bank' : 'cash', date: p.date });
+  return p;
+});
+route('patch', '/api/purchases/:id/status', U, async req => {
+  const p = await Purchase.findById(req.params.id); if (!p) throw new Error('Not found'); const s = req.body.status;
+  if (s === 'received') await receive(p);
+  else if (s === 'in_transit' && p.status === 'ordered') { p.status = 'in_transit'; await p.save(); }
+  else if (s === 'cancelled' && req.user.role === 'admin' && p.status !== 'received') { p.status = 'cancelled'; await p.save(); }
+  else throw new Error('That change is not allowed');
+  return { ok: true };
+});
+
+// ---------- production
+route('get', '/api/production', U, async req => {
+  const r = await Prod.find().sort({ date: -1, createdAt: -1 }).limit(200).lean();
+  return req.user.role === 'admin' ? r : r.map(({ material, labour, unitCost, lines, ...x }) => x);
+});
+route('post', '/api/production', U, async req => {
+  const qty = num(req.body.qty), it = await Item.findById(req.body.product);
+  if (!it || it.kind !== 'finished') throw new Error('Choose a finished product'); if (qty <= 0) throw new Error('Enter the quantity built'); if (!it.bom.length) throw new Error('Add a bill of materials to this product first');
+  const raws = new Map((await Item.find({ _id: { $in: it.bom.map(b => b.item) } })).map(i => [String(i._id), i]));
+  for (const b of it.bom) { const r = raws.get(String(b.item)), need = b.qty * qty; if (!r || r.qty < need) throw new Error(`Not enough ${r ? r.name : 'material'}: need ${need}, have ${r ? r.qty : 0}`); }
+  const date = dt(req.body.date), lines = [];
+  const p = new Prod({ date, product: it._id, productName: it.name, qty, note: req.body.note });
+  for (const b of it.bom) { const r = raws.get(String(b.item)), need = b.qty * qty, cost = await stockOut(r._id, need, 'production', p._id, it.name, date); lines.push({ item: r._id, name: r.name, qty: need, unitCost: cost }); }
+  p.lines = lines; p.material = r2(sum(lines, l => l.qty * l.unitCost)); p.labour = r2(it.labour * qty); p.unitCost = r2((p.material + p.labour) / qty);
+  await p.save(); await stockIn(it._id, qty, p.unitCost, 'production', p._id, it.name, date);
+  return p;
+});
+
+// ---------- sales
+const FY = d => { const y = d.getUTCFullYear(); return d.getUTCMonth() >= 3 ? y : y - 1; };
+route('get', '/api/sales', U, async () => {
+  const [ss, pm] = await Promise.all([Sale.find().select('-lines').sort({ date: -1, createdAt: -1 }).limit(500).lean(), payMap('sale')]);
+  return ss.map(s => ({ ...s, paid: pm.get(String(s._id)) || 0 }));
+});
+route('post', '/api/sales', U, async req => {
+  const b = req.body, st = await getSet(); if (!Array.isArray(b.lines) || !b.lines.length) throw new Error('Add at least one item');
+  const cust = b.customer ? await Party.findById(b.customer) : null, date = dt(b.date);
+  const place = cust?.state || b.place || st.state, inter = !!st.state && !!place && place !== st.state;
+  const items = new Map((await Item.find({ _id: { $in: b.lines.map(l => l.item) } })).map(i => [String(i._id), i])), need = new Map(), lines = [];
+  for (const l of b.lines) {
+    const it = items.get(String(l.item)), qty = num(l.qty), rate = num(l.rate); if (!it) throw new Error('Item not found'); if (qty <= 0 || rate < 0) throw new Error('Check quantity and rate');
+    need.set(String(it._id), (need.get(String(it._id)) || 0) + qty);
+    const g = num(l.gstRate), taxable = r2(qty * rate);
+    lines.push({ item: it._id, name: it.name, hsn: it.hsn, unit: it.unit, qty, rate, gstRate: g, taxable, gst: r2(taxable * g / 100), cost: it.avgCost, warranty: it.warrantyMonths });
+  }
+  for (const [k, q] of need) { const it = items.get(k); if (it.qty < q) throw new Error(`Not enough stock: ${it.name} (have ${it.qty})`); }
+  const subtotal = r2(sum(lines, 'taxable')), gst = r2(sum(lines, 'gst')), exact = subtotal + gst, total = Math.round(exact);
+  const cgst = inter ? 0 : r2(gst / 2), sgst = inter ? 0 : r2(gst - cgst), igst = inter ? gst : 0;
+  const fy = FY(date), c = await Counter.findOneAndUpdate({ _id: 'inv-' + fy }, { $inc: { seq: 1 } }, { new: true, upsert: true });
+  const no = `${st.prefix || 'AV'}/${String(fy).slice(2)}-${String(fy + 1).slice(2)}/${String(c.seq).padStart(4, '0')}`;
+  const s = await Sale.create({ no, date, customer: cust?._id, customerName: cust?.name || b.customerName || 'Walk-in customer', customerGstin: cust?.gstin, place, inter, lines, subtotal, cgst, sgst, igst, gst, round: r2(total - exact), total, note: b.note });
+  for (const l of lines) await stockOut(l.item, l.qty, 'sale', s._id, no, date);
+  const paid = Math.min(num(b.paid), total); if (paid > 0) await Pay.create({ kind: 'sale', ref: s._id, party: s.customer, amount: paid, mode: b.mode === 'bank' ? 'bank' : 'cash', date });
+  return s;
+});
+route('post', '/api/sales/:id/cancel', A, async req => {
+  const s = await Sale.findById(req.params.id); if (!s || s.status === 'cancelled') throw new Error('Not found');
+  for (const l of s.lines) await stockIn(l.item, l.qty, l.cost, 'sale-cancel', s._id, s.no, new Date());
+  for (const p of await Pay.find({ kind: 'sale', ref: s._id, amount: { $gt: 0 } })) await Pay.create({ kind: 'sale', ref: s._id, party: p.party, amount: -p.amount, mode: p.mode, date: new Date(), note: 'Refund: invoice cancelled' });
+  s.status = 'cancelled'; await s.save(); return { ok: true };
+});
+route('post', '/api/pay', U, async req => {
+  const b = req.body, kind = b.kind === 'purchase' ? 'purchase' : 'sale'; if (kind === 'purchase' && req.user.role !== 'admin') throw new Error('Not allowed');
+  const doc = await (kind === 'sale' ? Sale : Purchase).findById(b.ref); if (!doc || doc.status === 'cancelled') throw new Error('Document not found');
+  const amt = r2(num(b.amount)); if (amt <= 0) throw new Error('Enter an amount');
+  const paid = (await Pay.aggregate([{ $match: { kind, ref: doc._id } }, { $group: { _id: null, t: { $sum: '$amount' } } }]))[0]?.t || 0;
+  if (amt > r2(doc.total - paid) + 0.01) throw new Error('That is more than the balance due');
+  return Pay.create({ kind, ref: doc._id, party: kind === 'sale' ? doc.customer : doc.supplier, amount: amt, mode: b.mode === 'bank' ? 'bank' : 'cash', date: dt(b.date) });
+});
+
+// ---------- expenses, fund, salary
+route('get', '/api/m/:c', A, req => { const m = MONEY[req.params.c]; if (!m) throw new Error('Unknown'); return m.find().sort({ date: -1, createdAt: -1 }).limit(300); });
+route('post', '/api/m/:c', A, async req => {
+  const m = MONEY[req.params.c], b = req.body; if (!m) throw new Error('Unknown'); const amount = r2(num(b.amount)); if (amount <= 0) throw new Error('Enter an amount');
+  const d = { date: dt(b.date), amount, mode: b.mode === 'bank' ? 'bank' : 'cash', note: b.note };
+  if (req.params.c === 'expenses') d.category = b.category || 'Other';
+  if (req.params.c === 'fund') d.type = b.type;
+  if (req.params.c === 'salary') { const e = await Employee.findById(b.employee); if (!e) throw new Error('Choose a staff member'); Object.assign(d, { employee: e._id, employeeName: e.name, month: b.month || day(d.date).slice(0, 7), type: b.type || 'salary' }); }
+  return m.create(d);
+});
+route('delete', '/api/m/:c/:id', A, async req => { const m = MONEY[req.params.c]; if (!m) throw new Error('Unknown'); await m.findByIdAndDelete(req.params.id); return { ok: true }; });
+
+// ---------- reports
+route('get', '/api/reports', A, async req => {
+  const now = new Date(), from = req.query.from ? dt(req.query.from) : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const to = req.query.to ? dt(req.query.to + 'T23:59:59.999Z') : now, rng = { $gte: from, $lte: to };
+  const cogsOf = ss => r2(sum(ss, s => sum(s.lines, l => l.qty * l.cost)));
+  const [sales, purch, exps, sals, items, allSales, allPur, sp, pp, pays, funds, expM, salM] = await Promise.all([
+    Sale.find({ status: 'active', date: rng }).lean(), Purchase.find({ status: 'received', date: rng }).lean(), Expense.find({ date: rng }).lean(), Salary.find({ date: rng }).lean(),
+    Item.find({ active: { $ne: false } }).lean(), Sale.find({ status: 'active' }).select('no total customerName date').lean(), Purchase.find({ status: { $ne: 'cancelled' } }).select('billNo total supplierName status date').lean(),
+    payMap('sale'), payMap('purchase'),
+    Pay.aggregate([{ $group: { _id: { k: '$kind', m: '$mode' }, t: { $sum: '$amount' } } }]), Fund.aggregate([{ $group: { _id: { k: '$type', m: '$mode' }, t: { $sum: '$amount' } } }]),
+    Expense.aggregate([{ $group: { _id: '$mode', t: { $sum: '$amount' } } }]), Salary.aggregate([{ $group: { _id: '$mode', t: { $sum: '$amount' } } }])]);
+  const revenue = r2(sum(sales, 'subtotal')), cogs = cogsOf(sales), expBy = {};
+  exps.forEach(e => { expBy[e.category || 'Other'] = r2((expBy[e.category || 'Other'] || 0) + e.amount); });
+  const expTotal = r2(sum(exps, 'amount')), salTotal = r2(sum(sals, 'amount'));
+  const pl = { revenue, cogs, gross: r2(revenue - cogs), expBy, expTotal, salTotal, net: r2(revenue - cogs - expTotal - salTotal) };
+  const gstOut = { cgst: r2(sum(sales, 'cgst')), sgst: r2(sum(sales, 'sgst')), igst: r2(sum(sales, 'igst')) }; gstOut.total = r2(gstOut.cgst + gstOut.sgst + gstOut.igst);
+  const gstIn = r2(sum(purch, 'gst'));
+  // position today
+  const stockRaw = r2(sum(items.filter(i => i.kind === 'raw'), i => Math.max(i.qty, 0) * i.avgCost)), stockFin = r2(sum(items.filter(i => i.kind === 'finished'), i => Math.max(i.qty, 0) * i.avgCost));
+  const recv = allSales.map(s => ({ no: s.no, name: s.customerName, due: r2(s.total - (sp.get(String(s._id)) || 0)) })).filter(x => x.due > 0.5);
+  let advances = 0; const payb = [];
+  allPur.forEach(p => { const paid = pp.get(String(p._id)) || 0; if (p.status === 'received') { const due = r2(p.total - paid); if (due > 0.5) payb.push({ no: p.billNo, name: p.supplierName, due }); } else advances += paid; });
+  const g = (arr, k, m) => arr.filter(x => x._id.k === k && x._id.m === m).reduce((a, x) => a + x.t, 0), gm = (arr, m) => arr.filter(x => x._id === m).reduce((a, x) => a + x.t, 0);
+  const bal = m => r2(g(pays, 'sale', m) + g(funds, 'capital_in', m) + g(funds, 'loan_in', m) - g(pays, 'purchase', m) - gm(expM, m) - gm(salM, m) - g(funds, 'drawing', m) - g(funds, 'loan_repay', m));
+  const cash = bal('cash'), bank = bal('bank');
+  const sumF = k => [...new Set(['cash', 'bank'])].reduce((a, m) => a + g(funds, k, m), 0);
+  const capital = r2(sumF('capital_in') - sumF('drawing')), loans = r2(sumF('loan_in') - sumF('loan_repay'));
+  const recvTotal = r2(sum(recv, 'due')), payTotal = r2(sum(payb, 'due')), adv = r2(advances);
+  const worth = r2(cash + bank + stockRaw + stockFin + recvTotal + adv - payTotal - loans);
+  // monthly trend, last 6 months
+  const months = []; for (let i = 5; i >= 0; i--) { const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1)); months.push({ k: d.toISOString().slice(0, 7), l: d.toLocaleString('en', { month: 'short', timeZone: 'UTC' }), rev: 0, profit: 0 }); }
+  const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1)), mr = { $gte: since };
+  const [ms, me, mm] = await Promise.all([Sale.find({ status: 'active', date: mr }).lean(), Expense.find({ date: mr }).lean(), Salary.find({ date: mr }).lean()]);
+  const mk = d => months.find(m => m.k === day(d).slice(0, 7));
+  ms.forEach(s => { const m = mk(s.date); if (m) { m.rev += s.subtotal; m.profit += s.subtotal - sum(s.lines, l => l.qty * l.cost); } });
+  [...me, ...mm].forEach(e => { const m = mk(e.date); if (m) m.profit -= e.amount; });
+  months.forEach(m => { m.rev = r2(m.rev); m.profit = r2(m.profit); });
+  const pending = await Purchase.find({ status: { $in: ['ordered', 'in_transit'] } }).select('supplierName billNo expected status').sort({ expected: 1 }).lean();
+  return { from: day(from), to: day(to), pl, gst: { out: gstOut, in: gstIn, net: r2(gstOut.total - gstIn) }, stockRaw, stockFin, recv: recv.sort((a, b) => b.due - a.due), recvTotal,
+    pay: payb.sort((a, b) => b.due - a.due), payTotal, advances: adv, cash, bank, capital, loans, worth, months, pending,
+    low: items.filter(i => i.reorder > 0 && i.qty <= i.reorder).map(i => ({ name: i.name, qty: i.qty, unit: i.unit, reorder: i.reorder })) };
+});
+
+// ---------- CSV export
+const csv = rows => rows.map(r => r.map(v => { let s = String(v ?? ''); if (/^[=+\-@]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }).join(',')).join('\n');
+const EXPORTS = {
+  sales: async () => [['Invoice', 'Date', 'Customer', 'Taxable', 'GST', 'Total', 'Status'], ...(await Sale.find().sort({ date: -1 }).lean()).map(s => [s.no, day(s.date), s.customerName, s.subtotal, s.gst, s.total, s.status])],
+  purchases: async () => [['Date', 'Supplier', 'Bill no', 'Status', 'Taxable', 'GST', 'Total'], ...(await Purchase.find().sort({ date: -1 }).lean()).map(p => [day(p.date), p.supplierName, p.billNo, p.status, p.subtotal, p.gst, p.total])],
+  expenses: async () => [['Date', 'Category', 'Amount', 'Mode', 'Note'], ...(await Expense.find().sort({ date: -1 }).lean()).map(e => [day(e.date), e.category, e.amount, e.mode, e.note])],
+  stock: async () => [['Item', 'Type', 'Unit', 'Stock', 'Avg cost', 'Value'], ...(await Item.find().sort({ name: 1 }).lean()).map(i => [i.name, i.kind, i.unit, i.qty, i.avgCost, r2(i.qty * i.avgCost)])],
+};
+app.get('/api/export/:what', A, async (req, res) => {
+  const f = EXPORTS[req.params.what]; if (!f) return res.status(404).end();
+  res.set({ 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="auravolt-${req.params.what}.csv"` }); res.send(csv(await f()));
+});
+
+// ---------- printable GST invoice
+const W1 = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+const W10 = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+const two = x => x < 20 ? W1[x] : W10[Math.floor(x / 10)] + (x % 10 ? ' ' + W1[x % 10] : '');
+const three = x => (x >= 100 ? W1[Math.floor(x / 100)] + ' Hundred' + (x % 100 ? ' ' : '') : '') + (x % 100 ? two(x % 100) : '');
+const words = n => { if (!n) return 'Zero'; let s = ''; const cr = Math.floor(n / 1e7), lk = Math.floor(n % 1e7 / 1e5), th = Math.floor(n % 1e5 / 1e3), rest = n % 1e3;
+  if (cr) s += three(cr) + ' Crore '; if (lk) s += two(lk) + ' Lakh '; if (th) s += two(th) + ' Thousand '; if (rest) s += three(rest); return s.trim(); };
+app.get('/invoice/:id', U, async (req, res) => {
+  const s = await Sale.findById(req.params.id).lean().catch(() => null); if (!s) return res.status(404).send('Invoice not found');
+  const st = await getSet(), paid = (await Pay.aggregate([{ $match: { kind: 'sale', ref: s._id } }, { $group: { _id: null, t: { $sum: '$amount' } } }]))[0]?.t || 0;
+  const fd = d => new Date(d).toLocaleDateString('en-IN', { timeZone: 'UTC' }), w = Math.max(0, ...s.lines.map(l => l.warranty || 0));
+  const rows = s.lines.map((l, i) => `<tr><td>${i + 1}</td><td>${esc(l.name)}${l.hsn ? `<br><small>HSN ${esc(l.hsn)}</small>` : ''}</td><td class=r>${l.qty} ${esc(l.unit)}</td><td class=r>${inr(l.rate)}</td><td class=r>${inr(l.taxable)}</td><td class=r>${l.gstRate}%</td><td class=r>${inr(l.taxable + l.gst)}</td></tr>`).join('');
+  res.send(`<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(s.no)}</title><style>
+body{font:14px/1.5 system-ui,Segoe UI,sans-serif;color:#111;max-width:820px;margin:0 auto;padding:20px}h1{font-size:20px;margin:0}small{color:#555}.r{text-align:right}
+table{width:100%;border-collapse:collapse;margin:14px 0}th,td{border:1px solid #ccc;padding:6px 8px;vertical-align:top}th{background:#f2f4f8;text-align:left}.head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.tot td{border:0;padding:3px 8px}.tot{width:auto;margin-left:auto}.b{font-weight:700;font-size:16px}button{padding:8px 16px;font:inherit;cursor:pointer;margin-bottom:12px}@media print{button{display:none}}</style></head><body>
+<button onclick="print()">Print / Save as PDF</button>
+<div class=head><div><h1>${esc(st.name || 'AuraVolt')}</h1><div>${esc(st.address)}</div><div>${st.phone ? 'Phone: ' + esc(st.phone) : ''} ${st.gstin ? ' GSTIN: <b>' + esc(st.gstin) + '</b>' : ''}</div></div>
+<div class=r><h1>TAX INVOICE</h1><div>No: <b>${esc(s.no)}</b></div><div>Date: ${fd(s.date)}</div>${s.status === 'cancelled' ? '<b style="color:#c00">CANCELLED</b>' : ''}</div></div>
+<p><b>Bill to:</b> ${esc(s.customerName)}${s.customerGstin ? '<br>GSTIN: ' + esc(s.customerGstin) : ''}<br>Place of supply: ${esc(s.place)}</p>
+<table><thead><tr><th>#</th><th>Item</th><th class=r>Qty</th><th class=r>Rate</th><th class=r>Taxable</th><th class=r>GST</th><th class=r>Amount</th></tr></thead><tbody>${rows}</tbody></table>
+<table class=tot><tr><td>Taxable value</td><td class=r>${inr(s.subtotal)}</td></tr>${s.inter ? `<tr><td>IGST</td><td class=r>${inr(s.igst)}</td></tr>` : `<tr><td>CGST</td><td class=r>${inr(s.cgst)}</td></tr><tr><td>SGST</td><td class=r>${inr(s.sgst)}</td></tr>`}
+<tr><td>Round off</td><td class=r>${inr(s.round)}</td></tr><tr class=b><td class=b>Total (INR)</td><td class="r b">${inr(s.total)}</td></tr><tr><td>Received</td><td class=r>${inr(paid)}</td></tr><tr><td>Balance due</td><td class=r>${inr(Math.max(0, s.total - paid))}</td></tr></table>
+<p><b>Amount in words:</b> Rupees ${words(s.total)} only.</p>${w ? `<p>Warranty: ${w} months from the date of invoice, against manufacturing defects.</p>` : ''}${st.cert ? `<p><small>${esc(st.cert)}</small></p>` : ''}
+<p class=r style="margin-top:50px">For ${esc(st.name || 'AuraVolt')}<br><br>Authorised signatory</p></body></html>`);
+});
+
+// ---------- employee personal finance (staff only)
+const E = [need('employee'), async (req, res, next) => {
+  const e = await Employee.findById(req.user.id).select(safe).catch(() => null);
+  if (!e || e.status !== 'active') return res.status(401).json({ error: 'Account disabled' }); req.emp = e; next();
+}];
+route('get', '/api/me', E, async req => ({ profile: req.emp, txns: await PTxn.find({ employee: req.emp._id }).sort({ date: -1, createdAt: -1 }).limit(2000) }));
+route('post', '/api/me/txns', E, req => { const { type, title, amount, category, date } = req.body; return PTxn.create({ employee: req.emp._id, type, title, amount: num(amount), category, date }); });
+route('delete', '/api/me/txns/:id', E, async req => { await PTxn.deleteOne({ _id: req.params.id, employee: req.emp._id }); return { ok: true }; });
+
+// ---------- pages
+const view = f => (req, res) => res.sendFile(path.join(__dirname, 'views', f));
+app.get('/', (req, res) => res.redirect(req.user ? '/app' : '/login.html'));
+app.get('/admin', (req, res) => res.redirect('/app'));
+app.get('/app', U, view('app.html'));
+app.get('/me', need('employee'), view('me.html'));
 app.use(express.static(path.join(__dirname, 'public')));
 
-if (!MONGODB_URI) { console.error('Set MONGODB_URI'); process.exit(1); }
 mongoose.connect(MONGODB_URI)
-  .then(() => app.listen(PORT, () => console.log(`AuraVolt running on ${PORT}`)))
+  .then(() => app.listen(PORT, () => console.log(`AuraVolt ERP running on ${PORT}`)))
   .catch(e => { console.error(e.message); process.exit(1); });

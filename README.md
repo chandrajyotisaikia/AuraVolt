@@ -1,83 +1,55 @@
-# AuraVolt Finance
+# AuraVolt ERP
 
-Dark-mode finance tracker for expenses, investments and sales. Node + Express backend, MongoDB Atlas database, single-file responsive frontend.
+A simple ERP for a small electronics assembly business in India (built around solar zatka machine assembly): stock, purchases and delivery tracking, production, GST invoices, money, salary, and profit reports.
 
 ```
-auravolt-finance/
-├── package.json
-├── server.js          # API + password gate + static hosting
-├── .gitignore
-└── public/
-    └── index.html     # dashboard UI (HTML, CSS, JS in one file)
+auravolt-erp/
+├── package.json  server.js  .gitignore  README.md
+├── views/   app.html (owner and staff screens)  me.html (staff personal finance)
+└── public/  login.html  style.css  app.js  erp.js  logo.png  logo-full.png
 ```
 
-Balance = investments + sales − expenses.
+## What it does
 
-## 1. Create the database (MongoDB Atlas, free)
+| Area | What you get |
+|---|---|
+| Stock | Raw materials and finished machines, weighted-average cost, stock value, reorder alerts, stock counts, opening stock |
+| Purchases | Supplier bills with ordered, in transit and received status, expected delivery dates, overdue flags, part payments. Receiving adds stock |
+| Production | Bill of materials per machine. A production run uses up materials, adds finished machines, and works out the cost per unit |
+| Sales | GST tax invoices (CGST and SGST, or IGST for other states), auto numbering per financial year, retail and retailer customers, part payments, printable invoice with amount in words, warranty line, certification note |
+| Money | Expenses, company fund (capital, drawings, loans), salary, advances and bonus, cash and bank balances |
+| Reports | Profit and loss for any dates, GST summary, stock valuation, business worth, who owes you, who you owe, 6-month trend, CSV downloads, print or save as PDF |
+| People | Owner sees everything. Staff log in and can make invoices, record production, receive deliveries and view stock, but never see costs, profit, salary or the fund. Staff also keep a private personal finance page |
 
-Render's free disk is wiped on every deploy, so data lives in Atlas.
+## First-time setup in the app
 
-1. Sign up at mongodb.com/atlas and create a free **M0** cluster.
-2. **Database Access** → add a user with a password (letters and numbers only avoids escaping issues).
-3. **Network Access** → add IP `0.0.0.0/0` (Render's free tier has no fixed IP).
-4. **Connect** → **Drivers** → copy the connection string. Replace `<password>` and add a database name before the `?`:
-   `mongodb+srv://USER:PASS@cluster0.xxxxx.mongodb.net/auravolt?retryWrites=true&w=majority`
+1. Sign in as `admin` with your `APP_PASSWORD`.
+2. **Team**, Business details: business name, GSTIN, your state, address, invoice prefix (for example `AV`) and a certification note such as your BIS licence number. Save. Invoices need your state to choose the right GST split.
+3. **Team**, Add staff: create the two staff logins. Give them to your staff. Passwords are shown once.
+4. **Stock**: tap *Load sample items* for a starting list of solar zatka parts, then edit it. Set each item's HSN, GST %, reorder level, and for the machine its selling price, assembly labour per unit and warranty. Check each part's quantity in the bill of materials.
+5. **Money**, Company fund: add your starting capital, split between cash and bank, so balances are right.
+6. **Parties**: add suppliers and retailers. Walk-in shop customers need no entry.
+7. Enter opening stock for materials you already hold (Stock, Add item, opening stock and cost per unit).
 
-## 2. Run locally (optional)
+## Daily use
 
-```bash
-npm install
-export MONGODB_URI="your-connection-string"
-export APP_PASSWORD="choose-a-password"
-npm start
-```
+- **Buy materials:** Purchases, New purchase. Mark *In transit*, then *Received* when it arrives. Stock rises at that point.
+- **Build machines:** Production, New run. The form shows which materials are short before you save.
+- **Sell:** Sales, New invoice, then Print. Record the payment now or later with *Receive*.
+- **Month end:** Reports, pick the dates, check profit and loss and the GST summary, then Print or Save as PDF for your CA.
 
-Open http://localhost:3000. On Windows PowerShell use `$env:MONGODB_URI="..."`.
+## Notes on the numbers
 
-## 3. Upload to GitHub
+- Stock cost is a weighted average. Purchase GST is treated as claimable input credit, so item cost excludes GST.
+- Profit = sales (excluding GST) minus the cost of materials sold, minus expenses, minus salaries and advances paid.
+- Cancelling an invoice returns stock and refunds any payment in the books.
+- GST figures are estimates from your entries. Confirm tax treatment, HSN codes and rates with your CA.
+- Not included yet: serial numbers per machine, e-way bills and e-invoicing, sales returns, TDS, and bank statement import.
 
-1. Create an account at github.com, then click **New repository**. Name it `auravolt-finance`, set it **Private**, and leave "Add README" unchecked. Click **Create repository**.
-2. Install Git from git-scm.com, then in the project folder run:
+## Deploy (MongoDB Atlas, GitHub, Render)
 
-```bash
-git init
-git add .
-git commit -m "Initial AuraVolt finance app"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/auravolt-finance.git
-git push -u origin main
-```
-
-3. When asked to sign in, use a Personal Access Token as the password: GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → generate with the `repo` scope.
-
-No Git installed? On the repo page click **Add file → Upload files**, drag in everything (keep the `public` folder structure), and commit.
-
-Later changes: `git add . && git commit -m "message" && git push`.
-
-## 4. Deploy on Render
-
-1. Sign up at render.com with your GitHub account.
-2. **New +** → **Web Service** → connect your `auravolt-finance` repo (authorize Render to access it if asked).
-3. Fill in:
-   - **Runtime:** Node
-   - **Build command:** `npm install`
-   - **Start command:** `npm start`
-   - **Instance type:** Free
-4. Under **Environment Variables** add:
-   - `MONGODB_URI` = your Atlas connection string
-   - `APP_PASSWORD` = a strong password (the browser will ask for it; username can be anything)
-5. Click **Create Web Service**. After the build finishes you get a URL like `https://auravolt-finance.onrender.com`.
-
-**Continuous deployment:** auto-deploy is on by default. Every `git push` to `main` redeploys.
-
-## Notes
-
-- Free Render services sleep after ~15 minutes idle; the first load afterwards takes about 30 seconds.
-- Keep `APP_PASSWORD` set. Without it anyone with the URL can read your finances.
-- Change the currency symbol with the `CUR` constant at the top of the script in `public/index.html`.
-- Add the site to your phone's home screen from the browser menu for app-like access.
-
-## Employees and PDF report
-
-- Add employees (name and designation) in the Employees section. Each entry is saved under the employee you pick, and old entries keep that name even if the employee is removed.
-- **Download PDF report** exports the summary, per-employee totals and every transaction. It uses the `CURRENCY` environment variable (default `$`). The PDF font only supports basic Latin characters, so for rupees set `CURRENCY` to `Rs. ` or `INR ` instead of the ₹ symbol.
+1. **Atlas:** free M0 cluster, database user, Network Access `0.0.0.0/0`, then copy the connection string with `/auravolt` before the `?`.
+2. **Local test:** `npm install`, set `MONGODB_URI` and `APP_PASSWORD`, run `npm start`, open `http://localhost:3000`.
+3. **GitHub:** new private repo, then `git init`, `git add .`, `git commit -m "AuraVolt ERP"`, `git branch -M main`, `git remote add origin <repo url>`, `git push -u origin main`. If you already have the earlier finance app in the repo, replace its files with these.
+4. **Render:** New Web Service from the repo. Build `npm install`, start `npm start`. Environment variables: `MONGODB_URI`, `APP_PASSWORD`, `SESSION_SECRET` (any long random text), optional `ADMIN_USER`. Auto-deploy runs on every push to `main`.
+5. Free Render services sleep when idle, so the first load can take about 30 seconds. Download the CSV exports now and then as a backup, and consider Atlas backups once the business depends on this.
