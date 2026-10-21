@@ -1,55 +1,69 @@
-# AuraVolt ERP
+# AuraVolt ERP (version 5)
 
-A simple ERP for a small electronics assembly business in India (built around solar zatka machine assembly): stock, purchases and delivery tracking, production, GST invoices, money, salary, and profit reports.
+Small ERP for a solar zatka machine assembly business in India. It follows your real workflow:
 
-```
-auravolt-erp/
-├── package.json  server.js  .gitignore  README.md
-├── views/   app.html (owner and staff screens)  me.html (staff personal finance)
-└── public/  login.html  style.css  app.js  erp.js  logo.png  logo-full.png
-```
-
-## What it does
-
-| Area | What you get |
+| Step | Where in the app |
 |---|---|
-| Stock | Raw materials and finished machines, weighted-average cost, stock value, reorder alerts, stock counts, opening stock |
-| Purchases | Supplier bills with ordered, in transit and received status, expected delivery dates, overdue flags, part payments. Receiving adds stock |
-| Production | Bill of materials per machine. A production run uses up materials, adds finished machines, and works out the cost per unit |
-| Sales | GST tax invoices (CGST and SGST, or IGST for other states), auto numbering per financial year, retail and retailer customers, part payments, printable invoice with amount in words, warranty line, certification note |
-| Money | Expenses, company fund (capital, drawings, loans), salary, advances and bonus, cash and bank balances |
-| Reports | Profit and loss for any dates, GST summary, stock valuation, business worth, who owes you, who you owe, 6-month trend, CSV downloads, print or save as PDF |
-| People | Owner sees everything. Staff log in and can make invoices, record production, receive deliveries and view stock, but never see costs, profit, salary or the fund. Staff also keep a private personal finance page |
+| 1. Order materials | **Orders**, *+ New order / invoice* |
+| 2. Get the invoice | Same form: upload the invoice photo or PDF. The details are read for you and you check them |
+| 3. Make payment | **Orders**, *Pay*: upload the payment screenshot. Amount, date, UTR number and payee are read and saved with the file |
+| 4. Arrange delivery | **Orders**, *Delivery*: upload the courier receipt. Company, tracking number and dates are read. If the delivery date is missing it asks you. Only possible after a payment is recorded |
+| 5. Receive | *Received* button on the delivery (owner or workshop staff). Stock goes up at that moment |
+| 6. Manufacture | **Production**, *+ Add today's units*: total units made today. Materials are used up and the cost per machine is worked out |
+| 7. Sell | **Sales**, *+ New invoice*. A sales-only login sees just this screen |
+| 8. Split profit 60:40 | **Phases**: profit for each phase, split between investor and operations, plus payouts |
 
-## First-time setup in the app
+## New settings (Render, Environment)
 
-1. Sign in as `admin` with your `APP_PASSWORD`.
-2. **Team**, Business details: business name, GSTIN, your state, address, invoice prefix (for example `AV`) and a certification note such as your BIS licence number. Save. Invoices need your state to choose the right GST split.
-3. **Team**, Add staff: create the two staff logins. Give them to your staff. Passwords are shown once.
-4. **Stock**: tap *Load sample items* for a starting list of solar zatka parts, then edit it. Set each item's HSN, GST %, reorder level, and for the machine its selling price, assembly labour per unit and warranty. Check each part's quantity in the bill of materials.
-5. **Money**, Company fund: add your starting capital, split between cash and bank, so balances are right.
-6. **Parties**: add suppliers and retailers. Walk-in shop customers need no entry.
-7. Enter opening stock for materials you already hold (Stock, Add item, opening stock and cost per unit).
+| Variable | Needed | What it does |
+|---|---|---|
+| `MONGODB_URI`, `APP_PASSWORD`, `SESSION_SECRET` | Yes | As before |
+| `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` | Optional | Lets the app read invoices, payment screenshots and delivery receipts. Without it you type the details in and the files are still saved |
+| `GEMINI_MODEL` / `ANTHROPIC_MODEL` | Optional | Change the reading model if the default is retired |
+| `CRON_KEY` | Optional | A secret word for the daily reminder link (below) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional | Where reminders are sent |
 
-## Daily use
+Uploaded files are sent to the AI provider you choose, only to read them. Check what you are comfortable sharing. Details that are read are always shown for you to check before saving.
 
-- **Buy materials:** Purchases, New purchase. Mark *In transit*, then *Received* when it arrives. Stock rises at that point.
-- **Build machines:** Production, New run. The form shows which materials are short before you save.
-- **Sell:** Sales, New invoice, then Print. Record the payment now or later with *Receive*.
-- **Month end:** Reports, pick the dates, check profit and loss and the GST summary, then Print or Save as PDF for your CA.
+## Phases and the 60:40 split
 
-## Notes on the numbers
+- **Phases, Start new phase** (for example Phase 1 starting 10 Sept). Starting a new phase closes the previous one. Orders, production and expenses go to the current phase automatically.
+- Sales use the **oldest unsold units first**, so Phase 1 units are sold before Phase 2 units, and each phase keeps its own cost per unit.
+- **Profit for a phase** = sales of its units sold (excluding GST) minus the cost of those units minus the matching share of the phase's expenses and salaries (sold units divided by built units). Example: 20 built, 14 sold means 14/20 of the phase expenses are counted, and the 6 unsold machines carry their cost forward.
+- The split (default 60 investor, 40 operations) and the names are in **Team, Business details**. **Record payout** tracks what has been paid to each person and what is still due.
+- Expenses that have no phase are placed by date into the phase that was running that day.
 
+## Reminders
+
+- **Remind me** on any delivery adds the arrival date to your phone calendar with an alarm.
+- The dashboard shows a **Delivery reminder** box for deliveries due today or overdue.
+- **Telegram messages**: create a bot with @BotFather, get your chat ID, set the three variables above, then create a free job on cron-job.org that opens `https://YOUR-SITE.onrender.com/api/cron/reminders?key=YOUR_CRON_KEY` every morning. It also wakes the sleeping free Render service. It lists overdue and due-today deliveries and low-stock items.
+- **Tracking**: the *Track* button searches the courier and tracking number. Live tracking is not built in because most Indian carriers have no public tracking service.
+
+## Sales person login and installing the app
+
+1. **Team, Add staff**: set **Department** to *Sales*. Give them the generated ID and password.
+2. They sign in at your site on their phone. They see only **Sales** and **My money**. They can make invoices, mark customers as paid and view stock and prices, but see no costs, profit, suppliers or other people's sales.
+3. To install it like an app: in Chrome tap the *Install app* button at the top (or the browser menu, *Add to Home screen*).
+
+## Cleaning up duplicate entries
+
+**Money, Expenses or Fund, Remove duplicate entries** counts entries that are exact copies (same date, amount, type, mode and note), asks you to confirm, and keeps one of each. Importing the same file again now skips exact copies automatically.
+
+## Updating your live site
+
+Upload the changed files to GitHub (replace the old ones, keep the folders: `server.js` in the main folder, `app.html` in `views`, the rest in `public`). Render redeploys by itself in 2 to 3 minutes. Then reload the page. No new packages are needed.
+
+## Notes
+
+- Uploaded invoices, screenshots and receipts are stored in your MongoDB database (about 0.3 MB per photo, photos are shrunk before upload). The free Atlas plan holds 512 MB.
 - Stock cost is a weighted average. Purchase GST is treated as claimable input credit, so item cost excludes GST.
-- Profit = sales (excluding GST) minus the cost of materials sold, minus expenses, minus salaries and advances paid.
-- Cancelling an invoice returns stock and refunds any payment in the books.
 - GST figures are estimates from your entries. Confirm tax treatment, HSN codes and rates with your CA.
-- Not included yet: serial numbers per machine, e-way bills and e-invoicing, sales returns, TDS, and bank statement import.
+- Not included yet: serial numbers per machine, e-way bills and e-invoicing, sales returns, partial deliveries, TDS.
 
-## Deploy (MongoDB Atlas, GitHub, Render)
+## Setup from scratch
 
-1. **Atlas:** free M0 cluster, database user, Network Access `0.0.0.0/0`, then copy the connection string with `/auravolt` before the `?`.
-2. **Local test:** `npm install`, set `MONGODB_URI` and `APP_PASSWORD`, run `npm start`, open `http://localhost:3000`.
-3. **GitHub:** new private repo, then `git init`, `git add .`, `git commit -m "AuraVolt ERP"`, `git branch -M main`, `git remote add origin <repo url>`, `git push -u origin main`. If you already have the earlier finance app in the repo, replace its files with these.
-4. **Render:** New Web Service from the repo. Build `npm install`, start `npm start`. Environment variables: `MONGODB_URI`, `APP_PASSWORD`, `SESSION_SECRET` (any long random text), optional `ADMIN_USER`. Auto-deploy runs on every push to `main`.
-5. Free Render services sleep when idle, so the first load can take about 30 seconds. Download the CSV exports now and then as a backup, and consider Atlas backups once the business depends on this.
+1. **Atlas**: free M0 cluster, database user, Network Access `0.0.0.0/0`, copy the connection string with `/auravolt` before the `?`.
+2. **GitHub**: private repo, upload these files.
+3. **Render**: New Web Service, build `npm install`, start `npm start`, add the environment variables above.
+4. Sign in as `admin`, then **Team, Business details** (GSTIN, state, investor names), **Stock** (items and bill of materials), **Money, Fund** (starting capital), **Phases** (start Phase 1).
