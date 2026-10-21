@@ -122,3 +122,6 @@ dialog.modal::backdrop{background:rgba(3,6,14,.65);backdrop-filter:blur(3px)}
 .page-h .primary{white-space:nowrap}
 @media(max-width:860px){#nav{overflow-x:auto}#nav button{flex:0 0 74px}.lrow{grid-template-columns:1fr 1fr}.lrow select:first-child{grid-column:1/-1}.lrow:not(:has(> :nth-child(4))){grid-template-columns:1fr 90px 34px}.lrow:not(:has(> :nth-child(4))) select:first-child{grid-column:auto}}
 @media print{html[data-theme]{--bg:#fff;--surface:#fff;--surface2:#f3f4f7;--line:#d8dce6;--text:#000;--muted:#555;--shadow:none}body{background:#fff}.side,.topbar,.no-print,.page-h button,.page-h .btn{display:none!important}.content{padding:0}section{break-inside:avoid}}
+/* order form: item name box sits inside the first grid cell */
+.lrow>:first-child{min-width:0}
+@media(max-width:860px){.lrow>:first-child{grid-column:1/-1}.lrow:not(:has(> :nth-child(4)))>:first-child{grid-column:auto}}
